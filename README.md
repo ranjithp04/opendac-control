@@ -134,6 +134,7 @@ app/src-tauri/      desktop app shell (Rust, Tauri 2)
 app/ui/             app UI (Svelte + TypeScript + Vite)
 app/API.md          contract between the UI and the Rust side
 docs/design/        UI mockups
+docs/protocol-g6.md the G6 USB protocol reference and device behaviour
 docs/images/        screenshots used in this README
 reports/            research reports (EQ preset design)
 research_notes/     notes behind the reports
@@ -152,4 +153,4 @@ research_notes/     notes behind the reports
 
 ## License
 
-MIT; see [LICENSE](LICENSE). Thanks to [linuxblaster_control](https://github.com/RizeCrime/linuxblaster_control) (MIT), whose USB protocol notes were the starting point for this project's G6 protocol work. This project is not affiliated with or endorsed by Creative Technology. Sound BlasterX and SBX are trademarks of their owner.
+MIT; see [LICENSE](LICENSE). Thanks to [linuxblaster_control](https://github.com/RizeCrime/linuxblaster_control) (MIT), whose USB protocol notes were the starting point for the [G6 protocol reference](docs/protocol-g6.md). This project is not affiliated with or endorsed by Creative Technology. Sound BlasterX and SBX are trademarks of their owner.

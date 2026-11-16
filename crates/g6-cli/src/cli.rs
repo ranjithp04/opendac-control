@@ -249,7 +249,7 @@ mod tests {
         Cli::command().debug_assert();
     }
 
-    /// Every command line of the project plan §4 M1 (with concrete values).
+    /// Every documented `g6` command line (README), with concrete values.
     #[test]
     fn every_plan_command_line_parses() {
         let lines: &[&[&str]] = &[

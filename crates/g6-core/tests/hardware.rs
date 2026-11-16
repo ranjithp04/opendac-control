@@ -9,7 +9,7 @@
 //! original value, write, read back, then restore the original. The restore
 //! runs in a `Drop` guard or after `catch_unwind`, so a failed assertion does
 //! not leave the device changed. Only interface 4 is opened (by
-//! `HidConnector`); only commands from the project plan §7.2 are used. Tests share one
+//! `HidConnector`); only commands from `docs/protocol-g6.md` §2.2 are used. Tests share one
 //! device and serialise on a lock, so `--test-threads=1` is optional but
 //! harmless.
 
@@ -356,7 +356,7 @@ fn hw_scout_roundtrip_leaves_playback_settings_as_they_were() {
         assert_eq!(rig.dev.read_mask().unwrap().scout(), want, "read back");
     }
     assert_eq!(rig.dev.read_mask().unwrap(), original, "mask restored");
-    // the project plan §6: Scout writes its curve into the EQ registers and the device
+    // `docs/protocol-g6.md` §1: Scout writes its curve into the EQ registers and the device
     // restores them itself when Scout goes off.
     assert_eq!(read_all(&rig.dev), before, "settings restored");
 }

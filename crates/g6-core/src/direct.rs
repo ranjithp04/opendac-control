@@ -1,6 +1,6 @@
 //! Our Direct Mode: save state, disable SBX / Scout / EQ, restore on exit.
 //!
-//! Creative's own Direct Mode command (`0x39`) is not used (the project plan §1).
+//! Creative's own Direct Mode command (`0x39`) is not used: its status cannot be decoded.
 //! Enabling saves {SBX / Scout mask, EQ enable, effect toggles} to disk
 //! **before** anything on the device is changed, so a crash or a failed
 //! write never loses the user's settings; then it switches Scout, SBX and EQ

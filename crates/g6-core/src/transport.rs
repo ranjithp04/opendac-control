@@ -5,7 +5,7 @@
 //! hardware.
 //!
 //! **Interface 3 (consumer control / volume knob) is never opened**: opening it
-//! on macOS stops the OS from receiving the knob until a USB replug (the project plan §6).
+//! on macOS stops the OS from receiving the knob until a USB replug (`docs/protocol-g6.md` §1).
 
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -202,7 +202,7 @@ impl Backoff {
 }
 
 /// Open the device and check it answers an identity query. The first reads
-/// right after plug-in have failed in testing (the project plan §5 #1), so a transport
+/// right after plug-in have failed in testing (`docs/protocol-g6.md` §3 item 1), so a transport
 /// is only returned once it has produced a valid reply. Other frames read
 /// during the probe are dropped (callers read full state after connecting).
 pub fn open_and_probe(
@@ -252,7 +252,7 @@ pub fn connect_with_retry(
 }
 
 /// "Not found" is routine while unplugged; anything else is the real error we
-/// want to see (the project plan §5 #1).
+/// want to see (`docs/protocol-g6.md` §3 item 1).
 pub(crate) fn log_connect_error(attempt: u32, e: &TransportError) {
     if *e == TransportError::NotFound {
         log::debug!("connect attempt {attempt}: {e}");

@@ -1,4 +1,4 @@
-//! Feature table (the project plan §7.3): family / id → f32 value.
+//! Feature table (`docs/protocol-g6.md` §2.3): family / id → f32 value.
 //!
 //! This table is an allow-list. Only features listed here may be read or
 //! written; values are validated and rounded before they are sent.
@@ -173,7 +173,7 @@ const P: u8 = FAMILY_PLAYBACK;
 const M: u8 = FAMILY_MIC;
 const D: u8 = FAMILY_DECODER;
 
-/// Every feature in the project plan §7.3.
+/// Every feature in `docs/protocol-g6.md` §2.3.
 pub static FEATURES: &[Feature] = &[
     // Family 0x96 — playback
     boolean(P, 0x00, "surround"),
@@ -224,7 +224,7 @@ pub static FEATURES: &[Feature] = &[
     db(M, 0x19, "mic_eq_6", 12.0),
     db(M, 0x1a, "mic_eq_7", 12.0),
     db(M, 0x1b, "mic_eq_8", 12.0),
-    // ASSUMPTION: the project plan does not give a type for recording Smart Volume; treated as bool.
+    // ASSUMPTION: the protocol notes give no type for recording Smart Volume; treated as bool.
     boolean(M, 0x2c, "mic_smartvol"),
     // Family 0x97
     choice(D, 0x02, "decoder_mode", DECODER_MODES),
@@ -248,8 +248,8 @@ pub fn by_name(name: &str) -> Option<&'static Feature> {
     FEATURES.iter().find(|f| f.name == name)
 }
 
-/// Playback features Scout Mode sets itself when it is turned on (the project plan
-/// §6: EQ on with the Scout curve in the band registers, Smart Volume on at
+/// Playback features Scout Mode sets itself when it is turned on
+/// (`docs/protocol-g6.md` §1: EQ on with the Scout curve in the band registers, Smart Volume on at
 /// 0.9). While Scout is on their values are Scout's, not the user's; writing
 /// them right before turning Scout on would make the device remember the
 /// Scout curve as the "previous" EQ.

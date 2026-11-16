@@ -1,5 +1,5 @@
 //! A device plus its live [`DeviceState`], persisted last-known settings and
-//! re-apply on reconnect (the project plan §4 M1 item 8).
+//! re-apply on reconnect.
 //!
 //! [`Session`] owns the [`Device`], consumes its events on a second thread,
 //! keeps a shared [`DeviceState`] current and forwards every event to the
@@ -14,7 +14,7 @@
 //! device does not overwrite the settings that are meant to be restored.
 //!
 //! **Re-apply.** When the device reconnects (USB replug; the G6 was seen to
-//! come back with Surround off, the project plan §5 #2) the session reads the device,
+//! come back with Surround off, `docs/protocol-g6.md` §3 item 2) the session reads the device,
 //! compares it with the last known state and writes back only the
 //! differences: SBX / Scout, the active output's playback features, the
 //! mic / decoder features, DAC filter and mic boost. Then it reads the

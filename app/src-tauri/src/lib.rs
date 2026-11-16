@@ -46,7 +46,7 @@ impl Sink for TauriSink {
     }
 }
 
-/// Start the one long-lived device session (the project plan M2: restore the last
+/// Start the one long-lived device session (restore the last
 /// settings on connect) and its event forwarder; manage the backend.
 fn start_backend(app: &tauri::App) {
     let paths = Paths::system();

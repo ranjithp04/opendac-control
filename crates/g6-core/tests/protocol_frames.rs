@@ -1,4 +1,4 @@
-//! Frame encoding and decoding against the project plan §7.2 and §7.4. No device.
+//! Frame encoding and decoding against `docs/protocol-g6.md` §2.2 and §2.4. No device.
 
 mod common;
 
@@ -7,10 +7,10 @@ use g6_core::features::{Kind, FEATURES};
 use g6_core::protocol::*;
 
 // ---------------------------------------------------------------------------
-// §7.2 builders: exact bytes, LEN, zero padding, report-ID prefix
+// §2.2 builders: exact bytes, LEN, zero padding, report-ID prefix
 // ---------------------------------------------------------------------------
 
-/// Every fixed builder with the bytes the project plan §7.2 gives for it.
+/// Every fixed builder with the bytes `docs/protocol-g6.md` §2.2 gives for it.
 fn builder_table() -> Vec<(&'static str, Frame, &'static str)> {
     vec![
         ("identity", identity(), "5a 05 00"),
@@ -259,7 +259,7 @@ fn encode_limits() {
 }
 
 // ---------------------------------------------------------------------------
-// §7.4 captures, verbatim
+// §2.4 captures, verbatim
 // ---------------------------------------------------------------------------
 
 const CAP_OUTPUT: &str = "5a 2c 05 01 02";
@@ -352,7 +352,7 @@ fn capture_dump8_entries_raw_and_rounded() {
 
 #[test]
 fn dump_captures_decode_identically_with_and_without_padding() {
-    // Only the dumps are complete in §7.4; the short captures omit LEN's
+    // Only the dumps are complete in §2.4; the short captures omit LEN's
     // trailing zero bytes and are always read as padded 64-byte reports.
     for cap in [CAP_DUMP4, CAP_DUMP8] {
         assert_eq!(decode(&hex(cap)), decode(&report(cap)), "{cap}");
@@ -441,7 +441,7 @@ fn unknown_pushes_decode_as_unknown_and_keep_their_command() {
 
 #[test]
 fn undocumented_feature_ids_from_dumps_are_never_known() {
-    // §7.4: dumps include 96:70-72 and 95:0a-2d. Build frames of up to 9
+    // §2.4: dumps include 96:70-72 and 95:0a-2d. Build frames of up to 9
     // entries each and check that none of them is in the table.
     let mut entries: Vec<(u8, u8)> = (0x70..=0x72).map(|i| (0x96, i)).collect();
     // 95:0a-2d minus the ids that are documented (mic EQ, recording smart volume).

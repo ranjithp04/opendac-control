@@ -5,7 +5,7 @@
 //! matched by command code (plus family / id for feature reads, `0x11`);
 //! every other incoming frame is a push and becomes an [`Event`].
 //!
-//! Writes follow the project plan §4 M1 item 6: send → wait for ACK
+//! Writes follow this sequence: send → wait for ACK
 //! `5a 02 0a CMD STATUS` → read back → confirm. A non-zero status is an
 //! error. A missing ACK is reported as [`Ack::Missing`] (the first write
 //! after open is known not to ACK, §5 #3) and the read-back decides.
@@ -57,7 +57,7 @@ pub enum Ack {
     /// `5a 02 0a CMD 00`.
     Ok,
     /// No ACK within the timeout. `first_write` = first write after open
-    /// (expected per the project plan §5 #3). The write was confirmed by read-back.
+    /// (expected, `docs/protocol-g6.md` §3 item 3). The write was confirmed by read-back.
     Missing { first_write: bool },
 }
 
@@ -769,7 +769,7 @@ mod tests {
     #[test]
     fn read_feature_rounds_float_noise() {
         let dev = FakeDevice::new();
-        // `fd ff 7f bf` from §7.4 ≈ -1.0
+        // `fd ff 7f bf` from §2.4 ≈ -1.0
         dev.set_feature(0x96, 0x0b, f32::from_le_bytes([0xfd, 0xff, 0x7f, 0xbf]));
         let (d, _rx) = start(&dev);
         assert_eq!(d.read_feature(feat("eq_31")).unwrap(), -1.0);

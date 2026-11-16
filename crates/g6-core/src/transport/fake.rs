@@ -2,7 +2,7 @@
 //! tests and for later layers (state, CLI) that need a device without
 //! hardware.
 //!
-//! It answers the §7.2 commands the way the real device does (replies, ACK
+//! It answers the §2.2 commands the way the real device does (replies, ACK
 //! `5a 02 0a CMD STATUS`, `5a 11` push after a feature write) and can inject
 //! pushes, unplug / replug, fail connects, drop the first ACK, reject writes
 //! or ignore writes (to test read-back mismatches).
@@ -15,7 +15,7 @@ use super::{Connector, Transport, TransportError};
 use crate::features::FEATURES;
 use crate::protocol::{self, cmd, DacFilter, Frame, MicBoost, Output, REPORT_LEN};
 
-/// Firmware string the fake reports (from the test unit, the project plan header).
+/// Firmware string the fake reports (from the test unit, `docs/protocol-g6.md`).
 pub const FAKE_FIRMWARE: &str = "2.1.250903.1324";
 
 /// Feature values (by family / id) and the SBX bit saved when Scout went on.
@@ -45,7 +45,7 @@ struct Sim {
     /// Don't answer the next N host frames with this command.
     drop_replies: Option<(u8, u32)>,
     /// EQ / Smart Volume / SBX as they were before Scout was turned on by a
-    /// write; restored when a write turns Scout off (the project plan §6).
+    /// write; restored when a write turns Scout off (`docs/protocol-g6.md` §1).
     before_scout: Option<BeforeScout>,
 }
 
@@ -178,7 +178,7 @@ impl FakeDevice {
     pub fn fail_next_connects(&self, n: u32) {
         self.with(|s| s.fail_connects = n)
     }
-    /// Don't ACK the first write after each open (the project plan §5 #3).
+    /// Don't ACK the first write after each open (`docs/protocol-g6.md` §3 item 3).
     pub fn set_drop_first_ack(&self, on: bool) {
         self.with(|s| s.drop_first_ack = on)
     }
@@ -234,7 +234,7 @@ impl FakeDevice {
         })
     }
     /// Scout button, as seen on hardware: Scout on applies Scout's settings
-    /// (the project plan §6) but the push only carries the mask and "EQ off", not the
+    /// (`docs/protocol-g6.md` §1) but the push only carries the mask and "EQ off", not the
     /// Scout curve or Smart Volume; Scout off restores the previous state and
     /// pushes the mask and a dump of the playback features.
     pub fn press_scout(&self, on: bool) {
@@ -285,7 +285,7 @@ impl FakeDevice {
     }
 }
 
-/// Scout Mode's EQ curve (the project plan §6), 31 Hz … 16 kHz.
+/// Scout Mode's EQ curve (`docs/protocol-g6.md` §1), 31 Hz … 16 kHz.
 pub const SCOUT_CURVE: [f32; 10] = [2.0, 3.0, 3.0, -2.0, -2.0, 0.0, 3.0, 4.0, 3.0, 2.0];
 
 impl Sim {

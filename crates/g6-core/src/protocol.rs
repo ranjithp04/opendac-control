@@ -1,7 +1,7 @@
-//! G6 frame encoding / decoding (the project plan §7.1, §7.2, §7.4).
+//! G6 frame encoding / decoding (`docs/protocol-g6.md` §2.1, §2.2, §2.4).
 //!
 //! Frame: `5a CMD LEN PAYLOAD…`, zero-padded to 64 bytes. `LEN` = number of
-//! payload bytes after `LEN`. Only commands listed in §7.2 can be built.
+//! payload bytes after `LEN`. Only commands listed in §2.2 can be built.
 
 use std::fmt;
 
@@ -209,7 +209,7 @@ pub enum MaskTarget {
 }
 
 // ---------------------------------------------------------------------------
-// Command builders (§7.2)
+// Command builders (§2.2)
 // ---------------------------------------------------------------------------
 
 /// `5a 05 00`
@@ -494,7 +494,7 @@ mod tests {
         assert!(f[v.len()..].iter().all(|b| *b == 0), "not zero-padded");
     }
 
-    // Captures from the project plan §7.4, verbatim.
+    // Captures from `docs/protocol-g6.md` §2.4, verbatim.
     const CAP_OUTPUT: &str = "5a 2c 05 01 02";
     const CAP_MASK: &str = "5a 26 0b 08 ff ff 05";
     const CAP_DUMP4: &str =

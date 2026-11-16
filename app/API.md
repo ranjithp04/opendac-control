@@ -74,7 +74,7 @@ Snapshots reach the UI from three places: command results, `state-changed`, `get
 
 Startup: `listen('state-changed')` first, then `get_state()`, then apply whichever has the higher `revision`. On `panel-shown` the UI may call `refresh_state()` if it wants the device re-read (optional; events keep it live without polling).
 
-Sliders: send at most every 50 ms while dragging and once on release (the project plan M2). Each call is applied and read back by `g6-core`, so keep one call in flight per control and send the latest value when it returns.
+Sliders: send at most every 50 ms while dragging and once on release (design decision). Each call is applied and read back by `g6-core`, so keep one call in flight per control and send the latest value when it returns.
 
 ## 2. Commands
 
@@ -184,7 +184,7 @@ The mapping is `impl From<...> for ApiError` in `api.rs` (tested).
 
 Implemented in `backend.rs`; listed here because the UI depends on them.
 
-1. **One session.** The backend starts one `g6_core::session::Session` at launch, with `reapply_on_first_connect: true` (the project plan M2: restore last settings on connect). `Connected` is announced only after the state is synced and re-applied.
+1. **One session.** The backend starts one `g6_core::session::Session` at launch, with `reapply_on_first_connect: true` (restore last settings on connect). `Connected` is announced only after the state is synced and re-applied.
 2. **State.** A forwarder thread reads the session receiver and groups events into bursts (events less than 30 ms apart, a burst cut at 200 ms). Each burst rebuilds the snapshot from `Session::state()` (`AppState::from_device`), bumps `revision` and emits one `state-changed` (after any `connection-changed` / `output-changed`). Snapshots are built under one lock, so a higher `revision` never carries an older session state.
 3. **Writes.** A command returns a snapshot that includes the confirmed value. `Session::state()` is updated by the session thread from the write's echo event and can lag the write's return, so the backend keeps the confirmed `Written::value` as a pending overlay applied to every snapshot until the session reports any value for that setting (the echo or a later change), the device reconnects or switches output, or 2 s pass. Commands that touch the device are serialised (one at a time), so multi-step ones (SBX after Scout off, Direct Mode, presets, Direct Mode following the jack) never interleave.
 4. **Direct Mode follows the jack.** On `OutputSwitched` (and on every connect) while Direct Mode is on, `DirectMode::enable` runs again (idempotent, adds the new output's entry and switches its EQ off), as documented in `g6-core::direct`. A failure is sent as `device-error`. Once Direct Mode is off, `g6-core` keeps the entries of the other outputs on disk until `disable` runs while that output is active; so on `OutputSwitched` / connect with Direct Mode off, if `DirectMode::pending_outputs` contains the active output, the backend runs `disable` (restoring that output's EQ enable and effect toggles), reports a failure as `device-error`, then re-reads the device. The `directMode` flag is cached from the Direct Mode file at startup and after every enable / disable.
@@ -202,4 +202,4 @@ Implemented in `backend.rs`; listed here because the UI depends on them.
 ## 7. Open points
 
 - **Hardware buttons during Direct Mode.** If the SBX / Scout button is pressed while Direct Mode is on, `sbx` / `scout` turn true while `directMode` is also true. The UI keeps the controls greyed out; whether the backend should switch them off again is not decided.
-- **Input Monitoring.** the project plan section 5 item 6: a packaged app may need the macOS Input Monitoring permission to open the HID interface. Not tested; check when the first signed build opens the G6.
+- **Input Monitoring.** `docs/protocol-g6.md` §3 item 6: a packaged app may need the macOS Input Monitoring permission to open the HID interface. Not tested; check when the first signed build opens the G6.
