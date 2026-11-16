@@ -251,6 +251,23 @@ pub async fn set_launch_at_login(
     .await
 }
 
+/// Light or dark window chrome (title bar, traffic lights, window background)
+/// to match the UI theme. App-wide on macOS: `AppHandle::set_theme` also
+/// refreshes every window, unlike the per-window setter.
+#[tauri::command]
+pub async fn set_app_theme(app: tauri::AppHandle, theme: String) -> ApiResult<()> {
+    use tauri::{window::Color, Manager, Theme};
+    let light = theme == "light";
+    app.set_theme(Some(if light { Theme::Light } else { Theme::Dark }));
+    if let Some(w) = app.get_webview_window(crate::panel::WINDOW_LABEL) {
+        let c = if light { 255 } else { 0 };
+        if let Err(e) = w.set_background_color(Some(Color(c, c, c, 255))) {
+            log::warn!("cannot set the window background: {e}");
+        }
+    }
+    Ok(())
+}
+
 /// Hide the panel (Escape key).
 #[tauri::command]
 pub async fn hide_panel(app: tauri::AppHandle) -> ApiResult<()> {

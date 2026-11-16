@@ -128,6 +128,7 @@ pub fn run() {
             commands::delete_preset,
             commands::set_launch_at_login,
             commands::hide_panel,
+            commands::set_app_theme,
         ])
         .build(tauri::generate_context!())
         .expect("error while building the OpenDAC Control app");

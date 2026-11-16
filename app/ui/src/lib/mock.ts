@@ -122,7 +122,7 @@ class MockBackend implements Backend {
 
   async invoke(cmd: string, args: Record<string, unknown>): Promise<unknown> {
     await new Promise((r) => setTimeout(r, LATENCY_MS));
-    if (cmd === 'get_state' || cmd === 'hide_panel' || cmd === 'list_presets' || cmd === 'list_eq_curves') {
+    if (cmd === 'get_state' || cmd === 'hide_panel' || cmd === 'set_app_theme' || cmd === 'list_presets' || cmd === 'list_eq_curves') {
       return this.read(cmd);
     }
     if (this.failCode) {

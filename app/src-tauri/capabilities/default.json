@@ -3,9 +3,5 @@
   "identifier": "default",
   "description": "Event listening for the panel window. App commands need no permission entry.",
   "windows": ["main"],
-  "permissions": [
-    "core:default",
-    "core:window:allow-set-theme",
-    "core:window:allow-set-background-color"
-  ]
+  "permissions": ["core:default"]
 }

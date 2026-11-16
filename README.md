@@ -13,8 +13,8 @@ Both use the same Rust library, `g6-core`.
 
 | | Dark | Light |
 |---|---|---|
-| **EQ** | <img src="docs/images/eq_night.png" width="260" alt="EQ tab, dark theme"> | <img src="docs/images/eq_day.png" width="260" alt="EQ tab, light theme"> |
-| **Effects** | <img src="docs/images/effects_night.png" width="260" alt="Effects tab, dark theme"> | <img src="docs/images/effects_day.png" width="260" alt="Effects tab, light theme"> |
+| **EQ** | <img src="docs/images/eq_dark.png" width="260" alt="EQ tab, dark theme"> | <img src="docs/images/eq_light.png" width="260" alt="EQ tab, light theme"> |
+| **Effects** | <img src="docs/images/effects_dark.png" width="260" alt="Effects tab, dark theme"> | <img src="docs/images/effects_light.png" width="260" alt="Effects tab, light theme"> |
 
 ## Features
 

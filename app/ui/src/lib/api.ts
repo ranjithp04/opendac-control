@@ -234,6 +234,7 @@ export interface Commands {
   // App
   set_launch_at_login: { args: { enabled: boolean }; result: AppState };
   hide_panel: { args: NoArgs; result: null };
+  set_app_theme: { args: { theme: 'light' | 'dark' }; result: null };
 }
 
 export type CommandName = keyof Commands;

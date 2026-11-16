@@ -122,6 +122,7 @@ Write commands reject `notConnected` until the session has synced after a connec
 | `delete_preset` | `name: string` | `AppState` | `PresetStore::delete`; clears `activePreset` if it was this one | `presetNotFound`, `presetInvalidName`, `storage`. Works while disconnected |
 | **App** | | | | |
 | `set_launch_at_login` | `enabled: boolean` | `AppState` | autostart plugin `enable` / `disable`, then `is_enabled()` into `launchAtLogin`. Off by default; never enabled without this call | `autostart` (a `state-changed` with the actual value is still emitted) |
+| `set_app_theme` | `theme: 'light' \| 'dark'` | `null` | app-wide light / dark window chrome (`AppHandle::set_theme`) and window background; called by the theme button and at startup | never rejects |
 | `hide_panel` | none | `null` | hides the window (not called by the UI at the moment) | never rejects |
 
 `EffectName` is `'surround' | 'crystalizer' | 'bass' | 'dialog' | 'smartVolume'`. `DacFilter` is `'fast-min' | 'slow-min' | 'nos' | 'fast-lin' | 'slow-lin'`.

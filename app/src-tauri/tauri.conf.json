@@ -26,7 +26,6 @@
         "resizable": false,
         "maximizable": false,
         "center": true,
-        "theme": "Dark",
         "backgroundColor": "#000000"
       }
     ],

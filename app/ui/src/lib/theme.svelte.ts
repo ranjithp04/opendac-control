@@ -1,7 +1,7 @@
 // Dark (pitch black, the default) or light (pure white) theme. The choice is a
 // per-machine UI preference, kept in localStorage; the window's title bar and
 // background follow it.
-import { inTauri } from './api';
+import { call, inTauri } from './api';
 
 export type Theme = 'dark' | 'light';
 
@@ -20,12 +20,7 @@ export const theme = $state<{ value: Theme }>({ value: load() });
 /** Apply `t` to the page and, inside Tauri, to the window chrome. */
 export function applyTheme(t: Theme): void {
   document.documentElement.dataset.theme = t;
-  if (!inTauri) return;
-  void import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
-    const w = getCurrentWindow();
-    w.setTheme(t).catch(() => {});
-    w.setBackgroundColor(t === 'light' ? '#ffffff' : '#000000').catch(() => {});
-  });
+  if (inTauri) call('set_app_theme', { theme: t }).catch(() => {});
 }
 
 export function toggleTheme(): void {
