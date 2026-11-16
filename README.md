@@ -51,6 +51,10 @@ Using the app:
 - **Notch:** on a MacBook with a notch and a full menu bar, the ◎ icon can be hidden behind the notch. Use the Dock icon instead.
 - **Launch at login:** off by default. Turn it on in the app's **Device** tab.
 
+### Automated builds
+
+`.github/workflows/build.yml` builds the macOS (Apple Silicon `.dmg`) and Windows (`.exe` installer, `.msi`, and a portable `.exe`) versions on GitHub Actions. It runs when a version tag is pushed (`git tag v0.1.0 && git push origin v0.1.0`), attaching the files to a draft GitHub release, or by hand from the Actions tab (files appear under the run's artifacts for 14 days).
+
 ### Windows (planned, milestone M3)
 
 The Windows build will produce a standalone `.exe` that you can copy to the Desktop or any folder, plus an installer (MSI / NSIS). It needs Microsoft Edge WebView2, which Windows 11 includes. Because the build is unsigned, SmartScreen warns on first run; choose **More info**, then **Run anyway**.
@@ -133,7 +137,6 @@ docs/design/        UI mockups
 docs/images/        screenshots used in this README
 reports/            research reports (EQ preset design)
 research_notes/     notes behind the reports
-the project plan             plan, milestones and the G6 USB protocol reference
 ```
 
 ## Safety notes
@@ -144,11 +147,9 @@ the project plan             plan, milestones and the G6 USB protocol reference
 ## Status
 
 - **M1, the device library and `g6` CLI:** done, verified on a G6 (firmware 2.1.250903.1324) on macOS.
-- **M2, the macOS app:** built and in use on macOS with the G6; tested by hand (Scout, pre-amp, EQ curves). Not yet fully checked against the project plan's M2 list.
+- **M2, the macOS app:** built and in use on macOS with the G6; tested by hand (Scout, pre-amp, EQ curves). Not yet fully checked against the M2 list.
 - **M3, Windows:** planned.
-
-See [the project plan](the project plan) for details and open questions.
 
 ## License
 
-MIT; see [LICENSE](LICENSE). Thanks to [linuxblaster_control](https://github.com/RizeCrime/linuxblaster_control) (MIT), whose USB protocol notes were the starting point for the G6 protocol reference in the project plan. This project is not affiliated with or endorsed by Creative Technology. Sound BlasterX and SBX are trademarks of their owner.
+MIT; see [LICENSE](LICENSE). Thanks to [linuxblaster_control](https://github.com/RizeCrime/linuxblaster_control) (MIT), whose USB protocol notes were the starting point for this project's G6 protocol work. This project is not affiliated with or endorsed by Creative Technology. Sound BlasterX and SBX are trademarks of their owner.

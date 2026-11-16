@@ -25,3 +25,6 @@ rustc-ice-*.txt
 
 # macOS Finder metadata
 .DS_Store
+
+# Local planning notes (not published)
+the project plan
