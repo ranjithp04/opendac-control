@@ -92,7 +92,7 @@ Captured examples (use in unit tests):
 | 1 | First reads right after USB plug-in failed (error not captured) | Retry with backoff; log the actual error |
 | 2 | Surround showed off after USB replug, came back after headphone jack switch | Re-apply on reconnect implemented. In the M1 replug test Surround was still on afterwards; not reproduced |
 | 3 | First write after opening the device returned no ACK (value still applied) | Treat missing ACK as "unknown", rely on read-back |
-| 4 | Windows: exclusive access / Sound Blaster Command coexistence | Test in M3 |
+| 4 | Windows: exclusive access / Sound Blaster Command coexistence | Tested 2026-11-17 on Windows (GitHub Actions build): the app connects, controls and live updates work, the volume knob still controls Windows volume, and it reconnects after a USB replug. |
 | 5 | ~~Feature writes other than EQ enable / pre-amp untested~~ | Done: every exposed feature, SBX/Scout, DAC filter and mic boost write verified by read-back on hardware (2026-11-16) |
 | 6 | macOS may require Input Monitoring permission for HID access in a packaged app | Check in M2 |
 | 7 | Never write undocumented registers | Feature table is an allow-list |

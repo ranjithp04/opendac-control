@@ -407,6 +407,33 @@ fn apply_write_order_is_scout_off_sbx_features_scout_on() {
 }
 
 #[test]
+fn apply_leaves_scout_features_alone_when_the_profile_does_not_mention_scout() {
+    // The inactive output's profile from `Preset::capture` has no sbx / scout
+    // entries; applied while Scout is on, it must not write EQ / Smart Volume
+    // into Scout's registers.
+    let fake = FakeDevice::new();
+    let (dev, _rx) = start(&fake);
+    dev.set_mask(g6_core::protocol::MaskTarget::Scout, true)
+        .unwrap();
+    let scout_eq = get(&fake, "eq_62");
+    let scout_vol = get(&fake, "smartvol_level");
+    let p = Preset {
+        headphones: Some(profile(&[
+            ("eq_62", -4.0),
+            ("smartvol_level", 0.1),
+            ("bass", 1.0),
+        ])),
+        speakers: None,
+    };
+    let r = preset::apply(&dev, &p).unwrap();
+    assert_eq!(r.writes, 1, "only the non-Scout feature is written");
+    assert_eq!(get(&fake, "bass"), 1.0);
+    assert_eq!(get(&fake, "eq_62"), scout_eq);
+    assert_eq!(get(&fake, "smartvol_level"), scout_vol);
+    assert!(fake.mask() & Mask::SCOUT != 0, "Scout stays on");
+}
+
+#[test]
 fn apply_uses_the_profile_of_the_active_output_only() {
     let p = Preset {
         headphones: Some(profile(&[("bass_level", 0.25)])),

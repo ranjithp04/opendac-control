@@ -9,6 +9,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use directories::ProjectDirs;
 use serde::de::DeserializeOwned;
@@ -94,7 +95,11 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
         .file_name()
         .map(|n| n.to_string_lossy())
         .unwrap_or_default();
-    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    // Unique per call: writers of one file in one process (the session thread
+    // and a refreshing caller) must not share a temp file.
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".{name}.{}.{n}.tmp", std::process::id()));
     let result = (|| {
         let mut f = File::create(&tmp)?;
         f.write_all(bytes)?;
@@ -200,6 +205,28 @@ mod tests {
         // No temp files left behind.
         let left: Vec<_> = fs::read_dir(p.parent().unwrap()).unwrap().collect();
         assert_eq!(left.len(), 1);
+    }
+
+    #[test]
+    fn concurrent_writers_of_one_file_do_not_clash() {
+        let t = TempDir::new();
+        let p = t.path().join("x.json");
+        let threads: Vec<_> = (0..8u32)
+            .map(|i| {
+                let p = p.clone();
+                std::thread::spawn(move || {
+                    for j in 0..50u32 {
+                        write_json(&p, &(i * 100 + j)).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in threads {
+            h.join().unwrap();
+        }
+        assert!(read_json::<u32>(&p).unwrap().is_some());
+        let left: Vec<_> = fs::read_dir(t.path()).unwrap().collect();
+        assert_eq!(left.len(), 1, "temp files left behind");
     }
 
     #[test]

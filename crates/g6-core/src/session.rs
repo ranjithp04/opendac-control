@@ -134,6 +134,33 @@ fn merge_changes(into: &mut DeviceState, before: &DeviceState, after: &DeviceSta
     changed
 }
 
+/// Copy into `into` the values `after` read from the device (`before` is the
+/// state the read started from), except where `into` has meanwhile moved off
+/// `before`: that is an event the session applied while the read was in
+/// flight, newer than the read. The connection flag is left alone.
+fn rebase_read(into: &mut DeviceState, before: &DeviceState, after: &DeviceState) {
+    fn take<T: PartialEq + Copy>(into: &mut Option<T>, before: Option<T>, after: Option<T>) {
+        if *into == before {
+            *into = after;
+        }
+    }
+    take(&mut into.output, before.output, after.output);
+    take(&mut into.mask, before.mask, after.mask);
+    take(&mut into.dac_filter, before.dac_filter, after.dac_filter);
+    take(&mut into.mic_boost, before.mic_boost, after.mic_boost);
+    for (dst, b, a) in [
+        (&mut into.headphones, &before.headphones, &after.headphones),
+        (&mut into.speakers, &before.speakers, &after.speakers),
+        (&mut into.common, &before.common, &after.common),
+    ] {
+        for (k, v) in &a.0 {
+            if dst.0.get(k) == b.0.get(k) {
+                dst.0.insert(k.clone(), *v);
+            }
+        }
+    }
+}
+
 /// Copy into `into` the values of `from` that `into` has none for yet
 /// (e.g. a setting added to the state after `into` was saved). Values `into`
 /// already has are kept.
@@ -379,21 +406,24 @@ impl Session {
     /// Re-read the active output's settings from the device into the state.
     /// What changed since the last read is saved as last known settings.
     pub fn refresh(&self) -> Result<DeviceState, Error> {
-        let mut s = self.state();
+        let before = self.state();
+        let mut s = before.clone();
         s.refresh(&self.device)?;
         let mut g = self.shared.lock();
-        // Keep the connection flag the event thread maintains.
-        s.connected = g.connected;
+        // Events applied while the device was being read are newer than the
+        // read: keep them (and don't remember the stale read as last known).
+        let mut merged = g.clone();
+        rebase_read(&mut merged, &before, &s);
         let save = {
             let mut p = self.shared.persisted();
-            merge_changes(&mut p, &g, &s).then(|| p.clone())
+            merge_changes(&mut p, &g, &merged).then(|| p.clone())
         };
-        *g = s.clone();
+        *g = merged.clone();
         drop(g);
         if let Some(p) = save {
             persist(&self.paths, &p);
         }
-        Ok(s)
+        Ok(merged)
     }
 }
 
@@ -745,6 +775,70 @@ mod tests {
             .unwrap();
         assert_eq!(on_disk.headphones.get(feat("eq_2k")), Some(4.5));
         assert!(!on_disk.connected);
+    }
+
+    #[test]
+    fn device_writes_without_echo_reach_the_state_and_the_file() {
+        // DAC filter / mic boost writes are not echoed by the device; the
+        // session learns of them from the write's read-back, with no refresh.
+        let fake = FakeDevice::new();
+        let t = TempDir::new();
+        let (s, _rx) = start(&fake, cfg(&t, false));
+        s.device().set_dac_filter(DacFilter::Nos).unwrap();
+        s.device().set_mic_boost(MicBoost::Db10).unwrap();
+        let file = Paths::under(t.path()).last_known_file();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let st = s.state();
+            let on_disk = store::read_json::<DeviceState>(&file).unwrap_or(None);
+            if st.dac_filter == Some(DacFilter::Nos)
+                && st.mic_boost == Some(MicBoost::Db10)
+                && on_disk.is_some_and(|d| {
+                    d.dac_filter == Some(DacFilter::Nos) && d.mic_boost == Some(MicBoost::Db10)
+                })
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "state / file never updated");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn refresh_keeps_events_that_arrive_while_reading() {
+        let fake = FakeDevice::new();
+        let t = TempDir::new();
+        let (s, rx) = start(&fake, cfg(&t, false));
+        // Slow the read down (the first feature reads time out), and press
+        // the SBX button meanwhile, after the mask was read.
+        fake.drop_replies(cmd::FEATURE_READ, 2);
+        let f2 = fake.clone();
+        let presser = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            f2.press_mask(Mask::SBX);
+        });
+        let st = s.refresh().unwrap();
+        presser.join().unwrap();
+        wait_event(
+            &rx,
+            |e| matches!(e, Event::Changed(Change::Mask(m)) if m.sbx()),
+        );
+        assert!(st.mask.unwrap().sbx(), "refresh result");
+        assert!(s.state().mask.unwrap().sbx(), "live state");
+        // The file must not take the stale read either.
+        let file = Paths::under(t.path()).last_known_file();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !store::read_json::<DeviceState>(&file)
+            .unwrap_or(None)
+            .is_some_and(|d| d.mask.is_some_and(|m| m.sbx()))
+        {
+            assert!(Instant::now() < deadline, "SBX never reached the file");
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(200));
+        let d: DeviceState = store::read_json(&file).unwrap().unwrap();
+        assert!(d.mask.unwrap().sbx(), "file overwritten by the stale read");
+        assert!(s.state().mask.unwrap().sbx());
     }
 
     #[test]

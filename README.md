@@ -55,9 +55,9 @@ Using the app:
 
 `.github/workflows/build.yml` builds the macOS (Apple Silicon `.dmg`) and Windows (`.exe` installer, `.msi`, and a portable `.exe`) versions on GitHub Actions. It runs when a version tag is pushed (`git tag v0.1.0 && git push origin v0.1.0`), attaching the files to a draft GitHub release, or by hand from the Actions tab (files appear under the run's artifacts for 14 days).
 
-### Windows (planned, milestone M3)
+### Windows
 
-The Windows build will produce a standalone `.exe` that you can copy to the Desktop or any folder, plus an installer (MSI / NSIS). It needs Microsoft Edge WebView2, which Windows 11 includes. Because the build is unsigned, SmartScreen warns on first run; choose **More info**, then **Run anyway**.
+The Windows build (from the GitHub Actions workflow above) produces a standalone `OpenDAC-Control-portable.exe` that you can copy to the Desktop or any folder, plus an installer (NSIS `.exe` and `.msi`). It needs Microsoft Edge WebView2, which Windows 11 includes. Because the build is unsigned, SmartScreen warns on first run; choose **More info**, then **Run anyway**.
 
 ## Command-line tool (`g6`)
 
@@ -149,7 +149,7 @@ research_notes/     notes behind the reports
 
 - **M1, the device library and `g6` CLI:** done, verified on a G6 (firmware 2.1.250903.1324) on macOS.
 - **M2, the macOS app:** built and in use on macOS with the G6; tested by hand (Scout, pre-amp, EQ curves). Not yet fully checked against the M2 list.
-- **M3, Windows:** planned.
+- **M3, Windows:** built on GitHub Actions and tested on Windows with the G6 (controls, live updates, volume knob, reconnect).
 
 ## License
 

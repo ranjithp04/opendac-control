@@ -195,7 +195,8 @@ impl DirectMode {
             mask: None,
             outputs: BTreeMap::new(),
         });
-        if !saved.active {
+        let first_save = !saved.active;
+        if first_save {
             saved.active = true;
             saved.mask = Some(SavedMask {
                 sbx: mask.sbx(),
@@ -213,6 +214,16 @@ impl DirectMode {
         if mask.scout() {
             if let Some(w) = steps.run("scout off", dev.set_mask(MaskTarget::Scout, false))? {
                 sbx = w.value.sbx();
+                // With Scout on the mask shows SBX off; the device restores
+                // the real SBX state when Scout goes off. Save that too, or
+                // a later disable would leave SBX off once Scout is switched
+                // off again.
+                if first_save && sbx {
+                    if let Some(m) = saved.mask.as_mut() {
+                        m.sbx = true;
+                    }
+                    store::write_json(&self.path, &saved)?;
+                }
                 if new_entry {
                     if let Some(user) =
                         steps.run("read after scout off", read_output_settings(dev))?

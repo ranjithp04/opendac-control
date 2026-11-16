@@ -106,6 +106,29 @@ fn enable_with_scout_on_writes_scout_off_first_and_eq_last() {
 }
 
 #[test]
+fn sbx_hidden_by_scout_is_saved_and_comes_back_after_scout_is_switched_off() {
+    use g6_core::protocol::MaskTarget;
+    let fake = FakeDevice::new();
+    let (dev, _rx) = start(&fake);
+    // SBX on, then Scout on: the device hides SBX while Scout is on and
+    // restores it when Scout goes off.
+    dev.set_mask(MaskTarget::Sbx, true).unwrap();
+    dev.set_mask(MaskTarget::Scout, true).unwrap();
+    assert_eq!(fake.mask(), Mask::SCOUT);
+    let t = TempDir::new();
+    let d = direct_in(&t);
+    d.enable(&dev).unwrap();
+    // The device restored SBX when Direct Mode turned Scout off.
+    let m = d.saved().unwrap().unwrap().mask.unwrap();
+    assert!(m.scout && m.sbx, "{m:?}");
+    d.disable(&dev).unwrap();
+    assert_eq!(fake.mask(), Mask::SCOUT);
+    // Scout off again: SBX is back.
+    dev.set_mask(MaskTarget::Scout, false).unwrap();
+    assert_eq!(fake.mask(), Mask::SBX);
+}
+
+#[test]
 fn enable_with_sbx_and_eq_on_writes_exactly_sbx_off_then_eq_off() {
     let fake = FakeDevice::new();
     user_setup(&fake);

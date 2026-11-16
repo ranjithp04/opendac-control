@@ -655,6 +655,11 @@ impl Worker {
             }
         };
         let msg = self.do_query(readback, expect)?;
+        // The read-back is the device's own report of the new value. Some
+        // writes (DAC filter, mic boost) are not echoed as a push, so without
+        // this the session state would never learn of them. Where the device
+        // does echo, the duplicate changes nothing (`DeviceState::apply`).
+        self.dispatch_push(msg.clone());
         Ok((msg, ack))
     }
 
@@ -934,6 +939,24 @@ mod tests {
         );
         assert_eq!(d.read_mic_boost().unwrap(), MicBoost::Db10);
         assert_eq!(d.read_output().unwrap(), Output::Headphones);
+    }
+
+    #[test]
+    fn write_read_back_is_dispatched_as_an_event() {
+        // The device does not echo DAC filter / mic boost writes as a push;
+        // the read-back is the only report of the new value.
+        let dev = FakeDevice::new();
+        let (d, rx) = start(&dev);
+        d.set_dac_filter(DacFilter::Nos).unwrap();
+        assert_eq!(
+            wait_for(&rx, |e| matches!(e, Event::Changed(Change::DacFilter(_)))),
+            Event::Changed(Change::DacFilter(DacFilter::Nos))
+        );
+        d.set_mic_boost(MicBoost::Db10).unwrap();
+        assert_eq!(
+            wait_for(&rx, |e| matches!(e, Event::Changed(Change::MicBoost(_)))),
+            Event::Changed(Change::MicBoost(MicBoost::Db10))
+        );
     }
 
     #[test]

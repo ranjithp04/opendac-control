@@ -1154,6 +1154,37 @@ mod tests {
     }
 
     #[test]
+    fn dac_filter_and_mic_boost_writes_outlive_the_pending_overlay() {
+        // The device does not push an echo for these two; the session must
+        // still learn the new values (otherwise the UI reverts once the
+        // overlay expires and the next replug re-applies the old value).
+        let dir = TempDir::new();
+        let file = Paths::under(&dir.0).last_known_file();
+        let r = rig_with(FakeDevice::new(), dir);
+        r.backend.set_dac_filter(DacFilter::SlowLin).unwrap();
+        r.backend.set_mic_boost(10).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let st = r.backend.session.state();
+            let on_disk = store::read_json::<DeviceState>(&file).unwrap_or(None);
+            if st.dac_filter == Some(core::DacFilter::SlowLin)
+                && st.mic_boost == Some(MicBoost::Db10)
+                && on_disk.is_some_and(|d| {
+                    d.dac_filter == Some(core::DacFilter::SlowLin)
+                        && d.mic_boost == Some(MicBoost::Db10)
+                })
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "session state / file not updated"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
     fn invalid_values_are_rejected_before_sending() {
         let r = rig();
         let before = r.fake.written().len();
@@ -1615,6 +1646,30 @@ mod tests {
             s.active_preset, None,
             "deleting the active preset clears it"
         );
+    }
+
+    #[test]
+    fn applying_a_profile_without_scout_info_keeps_scouts_eq() {
+        // Profiles captured for the inactive output carry no sbx / scout
+        // entry; applied while Scout is on they must not write EQ into it.
+        let dir = TempDir::new();
+        let store = PresetStore::from_paths(&Paths::under(&dir.0));
+        let profile = preset::PresetProfile {
+            features: [("eq_62".to_string(), -4.0), ("bass".to_string(), 1.0)].into(),
+            ..Default::default()
+        };
+        let p = preset::Preset {
+            headphones: Some(profile),
+            speakers: None,
+        };
+        store.save("Hand", &p).unwrap();
+        let r = rig_with(FakeDevice::new(), dir);
+        r.backend.set_scout(true).unwrap();
+        let s = r.backend.apply_preset("Hand").unwrap();
+        assert!(s.scout, "Scout stays on");
+        assert_eq!(fake_feature(&r.fake, "bass"), 1.0);
+        assert_eq!(fake_feature(&r.fake, "eq_62"), SCOUT_CURVE[1]);
+        assert_eq!(s.eq.bands, SCOUT_CURVE);
     }
 
     #[test]

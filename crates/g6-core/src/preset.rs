@@ -186,7 +186,10 @@ pub fn apply(dev: &Device, preset: &Preset) -> Result<Applied, Error> {
             writes += 1;
         }
     }
-    let scout = profile.scout == Some(true);
+    // Scout-owned features are skipped whenever Scout will be on afterwards,
+    // also for a profile that says nothing about Scout (the inactive output's
+    // profile from `Preset::capture`) while the device has it on.
+    let scout = profile.scout.unwrap_or(mask.scout());
     for f in FEATURES
         .iter()
         .filter(|f| !(scout && features::scout_owned(f)))
@@ -203,11 +206,24 @@ pub fn apply(dev: &Device, preset: &Preset) -> Result<Applied, Error> {
     Ok(Applied { output, writes })
 }
 
+/// Device names Windows refuses as file names (with any extension). Refused
+/// on every platform so profiles stay portable.
+fn is_reserved_name(name: &str) -> bool {
+    let base = name.split('.').next().unwrap_or(name).trim_end();
+    let base = base.to_ascii_uppercase();
+    matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|p| {
+            base.strip_prefix(p)
+                .is_some_and(|n| matches!(n.as_bytes(), [b'1'..=b'9']))
+        })
+}
+
 /// Preset name must be a safe file name stem.
 fn check_name(name: &str) -> Result<(), Error> {
     let ok = !name.is_empty()
         && name.len() <= 64
         && !name.starts_with('.')
+        && !is_reserved_name(name)
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'));
@@ -367,9 +383,33 @@ mod tests {
         for bad in ["", ".hidden", "../x", "a/b", "a\\b", &"x".repeat(65), "né"] {
             assert!(matches!(check_name(bad), Err(Error::BadName(_))), "{bad}");
         }
-        for ok in ["Night", "movie night", "a-b_c.1"] {
+        for ok in [
+            "Night",
+            "movie night",
+            "a-b_c.1",
+            "console",
+            "COM0",
+            "COM10",
+        ] {
             assert!(check_name(ok).is_ok(), "{ok}");
         }
+    }
+
+    #[test]
+    fn windows_reserved_names_are_refused_on_every_platform() {
+        for bad in [
+            "CON", "con", "Prn", "AUX", "nul", "COM1", "com9", "LPT1", "lpt9", "NUL.txt", "con.1",
+            "CON ",
+        ] {
+            assert!(matches!(check_name(bad), Err(Error::BadName(_))), "{bad}");
+        }
+        let t = TempDir::new();
+        let s = PresetStore::new(t.path());
+        assert!(matches!(
+            s.save("CON", &Preset::default()),
+            Err(Error::BadName(_))
+        ));
+        assert!(matches!(s.load("com1"), Err(Error::BadName(_))));
     }
 
     #[test]

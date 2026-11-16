@@ -223,28 +223,34 @@ impl DeviceState {
             }
         }
         // The jack may switch mid-read; retry so a profile never mixes outputs.
+        // Reads go to a scratch copy that replaces `self` only once the output
+        // is confirmed unchanged, so a switch never leaves values of one
+        // output in the other's profile.
         for attempt in 0..3 {
+            let mut read = self.clone();
             let output = dev.read_output()?;
-            self.output = Some(output);
+            read.output = Some(output);
             if let Some(m) = soft("mask", dev.read_mask())? {
-                self.mask = Some(m);
+                read.mask = Some(m);
             }
             if let Some(x) = soft("dac filter", dev.read_dac_filter())? {
-                self.dac_filter = Some(x);
+                read.dac_filter = Some(x);
             }
             if let Some(x) = soft("mic boost", dev.read_mic_boost())? {
-                self.mic_boost = Some(x);
+                read.mic_boost = Some(x);
             }
             for f in FEATURES {
                 if let Some(v) = soft(f.name, dev.read_feature(f))? {
-                    self.set_feature(f, v);
+                    read.set_feature(f, v);
                 }
             }
             if dev.read_output()? == output {
+                *self = read;
                 return Ok(());
             }
             log::debug!("output switched during refresh (attempt {attempt}); retrying");
         }
+        log::warn!("output kept switching during refresh; state not updated");
         Ok(())
     }
 }
@@ -404,6 +410,31 @@ pub(crate) mod tests {
         assert_eq!(s.output, Some(Output::Headphones));
         assert_eq!(s.speakers.get(feat("bass")), Some(1.0));
         assert!(!s.headphones.is_empty());
+    }
+
+    #[test]
+    fn refresh_does_not_mix_outputs_when_the_jack_switches_mid_read() {
+        let fake = FakeDevice::new();
+        let (dev, _rx) = start(&fake);
+        // The mic boost read stalls for the reply timeout; the jack switches
+        // meanwhile, before any feature is read.
+        fake.drop_replies(crate::protocol::cmd::MIC_BOOST, 1);
+        let f2 = fake.clone();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            f2.set_feature(0x96, 0x10, 5.0);
+            f2.switch_output(Output::Speakers);
+        });
+        let mut s = DeviceState::new();
+        s.refresh(&dev).unwrap();
+        t.join().unwrap();
+        assert_eq!(s.output, Some(Output::Speakers));
+        assert_eq!(s.speakers.get(feat("eq_1k")), Some(5.0));
+        assert!(
+            s.headphones.is_empty(),
+            "values read after the switch must not land in the old output's profile: {:?}",
+            s.headphones
+        );
     }
 
     #[test]
