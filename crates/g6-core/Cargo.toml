@@ -1,0 +1,13 @@
+[package]
+name = "g6-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Device library for the Creative Sound BlasterX G6"
+
+[dependencies]
+directories = "6.0.0"
+hidapi = { version = "2.6.7", features = ["macos-shared-device"] }
+log = "0.4.35"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"

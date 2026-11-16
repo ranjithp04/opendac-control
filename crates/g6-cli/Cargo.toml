@@ -1,0 +1,16 @@
+[package]
+name = "g6-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command-line control for the Creative Sound BlasterX G6"
+
+[[bin]]
+name = "g6"
+path = "src/main.rs"
+
+[dependencies]
+g6-core = { path = "../g6-core" }
+clap = { version = "4.6.7", features = ["derive"] }
+log = "0.4.35"
+serde_json = "1.0.154"
