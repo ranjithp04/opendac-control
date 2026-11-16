@@ -116,7 +116,8 @@ fn validation_rejects_everything_outside_the_playback_table() {
     let bad: &[(&str, f32)] = &[
         ("eq_31", 12.5),     // out of range
         ("eq_31", f32::NAN), // not finite (cannot come from JSON, but the API takes f32)
-        ("eq_preamp", 0.0),  // never written
+        ("eq_preamp", 6.5),  // out of range (+-6)
+        ("eq_preamp", -7.0), // out of range (+-6)
         ("mic_aec", 1.0),    // not per-output
         ("mic_nr_level", 0.2),
         ("decoder_mode", 2.0),
@@ -238,7 +239,7 @@ fn an_invalid_preset_is_not_saved() {
     let t = TempDir::new();
     let store = PresetStore::new(t.path());
     let bad = Preset {
-        headphones: Some(profile(&[("eq_preamp", 1.0)])),
+        headphones: Some(profile(&[("eq_preamp", 6.5)])),
         speakers: None,
     };
     assert!(matches!(
@@ -254,7 +255,7 @@ fn hand_edited_files_are_checked_on_load_and_garbage_is_reported() {
     let store = PresetStore::new(t.path());
     std::fs::write(
         t.path().join("preamp.json"),
-        r#"{"headphones":{"eq_preamp":1}}"#,
+        r#"{"headphones":{"eq_preamp":7}}"#,
     )
     .unwrap();
     assert!(matches!(
@@ -306,7 +307,7 @@ fn save_current_then_load_restores_the_device() {
     assert_eq!(h.features["eq_16k"], -3.5);
     assert_eq!(h.features["surround_distance"], 175.5);
     assert_eq!(h.sbx, Some(true));
-    assert!(!h.features.contains_key("eq_preamp"));
+    assert_eq!(h.features["eq_preamp"], -2.5);
     assert!(h
         .features
         .keys()
@@ -327,13 +328,34 @@ fn save_current_then_load_restores_the_device() {
     assert_eq!(snapshot(&fake), before);
     assert_eq!(fake.mask(), Mask::SBX | Mask::VOICE_CLARITY);
 
-    // The pre-amp (96:0a) and the mic family were never written.
+    // Only playback features were written (never the mic family), and the
+    // pre-amp (96:0a) is among them: it was changed back from the mess below.
     for w in &writes(&fake)[writes_before..] {
         if w[1] == 0x12 {
             assert_eq!(w[4], FAMILY_PLAYBACK, "{w:02x?}");
-            assert_ne!(w[5], 0x0a, "pre-amp written");
         }
     }
+    assert_eq!(get(&fake, "eq_preamp"), -2.5);
+}
+
+#[test]
+fn the_pre_amp_is_saved_and_applied_per_output() {
+    let fake = FakeDevice::new(); // headphones
+    let (dev, _rx) = start(&fake);
+    let p = Preset {
+        headphones: Some(profile(&[("eq_preamp", -3.0)])),
+        speakers: Some(profile(&[("eq_preamp", 2.5)])),
+    };
+    p.validate().unwrap();
+    let json = serde_json::to_string(&p).unwrap();
+    assert_eq!(serde_json::from_str::<Preset>(&json).unwrap(), p);
+
+    preset::apply(&dev, &p).unwrap();
+    assert_eq!(get(&fake, "eq_preamp"), -3.0);
+    fake.switch_output(Output::Speakers);
+    let (dev, _rx) = start(&fake);
+    preset::apply(&dev, &p).unwrap();
+    assert_eq!(get(&fake, "eq_preamp"), 2.5);
 }
 
 #[test]

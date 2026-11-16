@@ -253,15 +253,21 @@ fn bool_features_reject_anything_but_zero_or_one() {
 }
 
 #[test]
-fn eq_preamp_is_readable_but_not_writable() {
+fn eq_preamp_is_writable_within_plus_minus_6_db_in_half_db_steps() {
     let p = by_name("eq_preamp").unwrap();
-    assert!(!p.exposed);
-    assert_eq!(p.validate(-2.5), Ok(-2.5));
-    assert_eq!(
-        p.validate_write(-2.5),
-        Err(FeatureError::NotExposed("eq_preamp"))
-    );
-    assert_eq!(FEATURES.iter().filter(|f| !f.exposed).count(), 1);
+    assert_eq!((p.family, p.id), (0x96, 0x0a));
+    assert!(p.exposed);
+    assert!(!scout_owned(p));
+    for v in [-6.0, -2.5, 0.0, 0.5, 6.0] {
+        assert_eq!(p.validate_write(v), Ok(v), "{v}");
+    }
+    // Rounded to 0.5 dB like the bands.
+    assert_eq!(p.validate_write(1.2), Ok(1.0));
+    for v in [-6.5, 6.5, 12.0, f32::NAN] {
+        assert!(p.validate_write(v).is_err(), "{v}");
+    }
+    // Nothing is hidden any more.
+    assert!(FEATURES.iter().all(|f| f.exposed));
 }
 
 #[test]

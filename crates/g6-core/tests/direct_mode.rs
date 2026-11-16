@@ -238,6 +238,27 @@ fn everything_already_off_writes_nothing_and_restores_nothing() {
 }
 
 #[test]
+fn the_eq_pre_amp_and_bands_are_not_saved_and_not_changed() {
+    let fake = FakeDevice::new();
+    user_setup(&fake); // pre-amp -2.5, eq_1k 3.0
+    let (dev, _rx) = start(&fake);
+    let t = TempDir::new();
+    let d = direct_in(&t);
+
+    d.enable(&dev).unwrap();
+    assert_eq!(get(&fake, "eq_preamp"), -2.5);
+    assert_eq!(get(&fake, "eq_1k"), 3.0);
+    let text = std::fs::read_to_string(d.path()).unwrap();
+    assert!(!text.contains("preamp"), "{text}");
+    assert!(!text.contains("eq_1k"), "{text}");
+
+    d.disable(&dev).unwrap();
+    assert_eq!(get(&fake, "eq_preamp"), -2.5);
+    assert_eq!(get(&fake, "eq_1k"), 3.0);
+    assert_eq!(get(&fake, "eq"), 1.0);
+}
+
+#[test]
 fn saved_file_records_what_was_on_before() {
     let fake = FakeDevice::new();
     user_setup(&fake);

@@ -1,0 +1,153 @@
+:root {
+  --bg: #000;
+  --card: #0b0b0b;
+  --border: #1c1c1c;
+  --border-2: #262626;
+  --text: #f2f2f2;
+  --text-2: #8c8c8c;
+  --text-3: #bdbdbd;
+  --acc: #3b9eff;
+  --amber: #ffb224;
+  --off: #4a4a4a;
+  --rail: #262626;
+  --thumb: #f2f2f2;
+  --thumb-ring: #000;
+  --on-acc: #000;
+  --on-amber: #000;
+  --sel-bg: #262626;
+  --border-strong: #3a3a3a;
+  --toast-bg: #141414;
+  --danger: #ff6b6b;
+  --mono: 'JetBrains Mono', ui-monospace, monospace;
+  color-scheme: dark;
+}
+
+/* Pure white theme (sun / moon button in the header). */
+:root[data-theme='light'] {
+  --bg: #fff;
+  --card: #f5f5f5;
+  --border: #e5e5e5;
+  --border-2: #d4d4d4;
+  --text: #0a0a0a;
+  --text-2: #6b6b6b;
+  --text-3: #404040;
+  --acc: #0a6cff;
+  --off: #a3a3a3;
+  --rail: #e0e0e0;
+  --thumb: #0a0a0a;
+  --thumb-ring: #fff;
+  --on-acc: #fff;
+  --sel-bg: #e5e5e5;
+  --border-strong: #a3a3a3;
+  --toast-bg: #fafafa;
+  --danger: #c62828;
+  color-scheme: light;
+}
+
+html,
+body {
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
+/* Outside Tauri (npm run dev) there is no transparent window: show a backdrop. */
+html[data-mock] body {
+  background: #1a1a1a;
+  min-height: 100vh;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 24px;
+}
+
+body {
+  color: var(--text);
+  font-family: Inter, system-ui, sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button,
+input {
+  font-family: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+[role='slider']:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 2px;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+input[type='text'] {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Horizontal sliders (native input, filled up to --p). */
+input[type='range'].hs {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  margin: 0;
+  cursor: pointer;
+  flex: 1;
+  min-width: 0;
+  height: 16px;
+}
+input[type='range'].hs:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+input[type='range'].hs::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(to right, var(--acc) var(--p, 0%), var(--rail) var(--p, 0%));
+}
+input[type='range'].hs::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--thumb);
+  margin-top: -6px;
+  border: 3px solid var(--thumb-ring);
+}
+input[type='range'].hs::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--rail);
+}
+input[type='range'].hs::-moz-range-progress {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--acc);
+}
+input[type='range'].hs::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--thumb);
+  border: 3px solid var(--thumb-ring);
+}
+
+/* Thin scrollbar for the tab body. */
+.scroll::-webkit-scrollbar {
+  width: 8px;
+}
+.scroll::-webkit-scrollbar-thumb {
+  background: var(--rail);
+  border-radius: 4px;
+}

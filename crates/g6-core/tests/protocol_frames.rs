@@ -222,12 +222,24 @@ fn feature_write_refuses_what_the_table_does_not_allow() {
     for (fam, id) in [(0x96, 0x70), (0x96, 0x72), (0x95, 0x0a), (0x95, 0x2d)] {
         assert!(feature_write(fam, id, 0.0).is_err(), "{fam:02x}:{id:02x}");
     }
-    // The pre-amp is readable but never writable, whatever the value.
+    // The pre-amp (96:0a) is writable within +-6 dB and refused outside.
     for v in [-6.0, -2.5, 0.0, 6.0] {
+        let (frame, sent) = feature_write(0x96, 0x0a, v).unwrap();
+        assert_eq!(sent, v);
+        let b = v.to_le_bytes();
+        assert_frame(
+            &frame,
+            &format!(
+                "5a 12 07 01 96 0a {:02x} {:02x} {:02x} {:02x}",
+                b[0], b[1], b[2], b[3]
+            ),
+        );
+    }
+    for v in [-6.5, 6.5, 12.0] {
         assert!(matches!(
             feature_write(0x96, 0x0a, v),
             Err(ProtocolError::Feature(
-                g6_core::features::FeatureError::NotExposed(_)
+                g6_core::features::FeatureError::OutOfRange { .. }
             ))
         ));
     }

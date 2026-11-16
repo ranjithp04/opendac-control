@@ -562,15 +562,15 @@ mod tests {
             Err(ProtocolError::Feature(FeatureError::Unknown { .. }))
         ));
         assert!(matches!(
-            feature_write(0x96, 0x0a, 0.0),
-            Err(ProtocolError::Feature(FeatureError::NotExposed(_)))
+            feature_write(0x96, 0x0a, 6.5),
+            Err(ProtocolError::Feature(FeatureError::OutOfRange { .. }))
         ));
         assert!(matches!(
             feature_write(0x96, 0x0b, 12.5),
             Err(ProtocolError::Feature(FeatureError::OutOfRange { .. }))
         ));
         assert!(feature_read(0x95, 0x0a).is_err());
-        // Read of the non-exposed pre-amp is allowed.
+        // The pre-amp can be read and written.
         assert!(feature_read(0x96, 0x0a).is_ok());
     }
 

@@ -272,13 +272,10 @@ fn hw_decoder_mode_roundtrip() {
 }
 
 #[test]
-#[ignore = "needs a G6 on USB; the pre-amp must be refused and stay unchanged"]
-fn hw_preamp_is_refused_and_unchanged() {
+#[ignore = "needs a G6 on USB; briefly changes and restores the EQ pre-amp"]
+fn hw_eq_preamp_roundtrip() {
     let rig = open();
-    let f = feat("eq_preamp");
-    let before = rig.dev.read_feature(f).unwrap();
-    assert!(rig.dev.write_feature(f, before + 0.5).is_err());
-    assert_eq!(rig.dev.read_feature(f).unwrap(), before);
+    feature_roundtrip(&rig.dev, "eq_preamp");
 }
 
 #[test]

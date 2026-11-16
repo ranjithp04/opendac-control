@@ -66,6 +66,9 @@ pub fn build(command: Command) -> Result<Action, UsageError> {
         Command::Eq(EqCommand::On) => Action::Apply(vec![feature_op("eq", 1.0)?]),
         Command::Eq(EqCommand::Off) => Action::Apply(vec![feature_op("eq", 0.0)?]),
         Command::Eq(EqCommand::Set { bands }) => Action::Apply(eq_set(&bands)?),
+        Command::Eq(EqCommand::Preamp { db }) => {
+            Action::Apply(vec![ui_op("eq_preamp", "EQ pre-amp", db)?])
+        }
         Command::Sbx(t) => Action::Apply(vec![Op::Mask(MaskTarget::Sbx, t.state.is_on())]),
         Command::Scout(t) => Action::Apply(vec![Op::Mask(MaskTarget::Scout, t.state.is_on())]),
         Command::Surround(a) => Action::Apply(surround(&a)?),
@@ -396,9 +399,21 @@ mod tests {
     }
 
     #[test]
-    fn pre_amp_is_never_written() {
-        // No command produces an op for the non-exposed pre-amp.
-        for args in [&["eq", "set", "31=1"][..], &["eq", "on"]] {
+    fn eq_preamp() {
+        assert_eq!(ops(&["eq", "preamp", "-2.5"]), [("eq_preamp".into(), -2.5)]);
+        assert_eq!(ops(&["eq", "preamp", "6"]), [("eq_preamp".into(), 6.0)]);
+        assert_eq!(ops(&["eq", "preamp", "-6"]), [("eq_preamp".into(), -6.0)]);
+        assert_eq!(ops(&["eq", "preamp", "0"]), [("eq_preamp".into(), 0.0)]);
+        assert!(err(&["eq", "preamp", "6.5"]).contains("outside the range -6..6"));
+        assert!(err(&["eq", "preamp", "-7"]).contains("outside the range -6..6"));
+        assert!(err(&["eq", "preamp", "1.2"]).contains("not a multiple of 0.5"));
+        assert!(err(&["eq", "preamp", "loud"]).contains("invalid value"));
+        assert!(err(&["eq", "preamp"]).contains("required"));
+    }
+
+    #[test]
+    fn other_eq_commands_leave_the_pre_amp_alone() {
+        for args in [&["eq", "set", "31=1"][..], &["eq", "on"], &["eq", "off"]] {
             for (name, _) in ops(args) {
                 assert_ne!(name, "eq_preamp");
             }

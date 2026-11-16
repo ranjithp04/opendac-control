@@ -42,7 +42,7 @@ pub enum Command {
     Status(StatusArgs),
     /// Stream changes pushed by the device (buttons, jack switch, replug). Ctrl-C to stop.
     Watch,
-    /// Equalizer: switch on/off or set band gains.
+    /// Equalizer: switch on/off, set band gains or the pre-amp.
     #[command(subcommand)]
     Eq(EqCommand),
     /// SBX on or off.
@@ -177,6 +177,12 @@ pub enum EqCommand {
         /// BAND=DB pairs.
         #[arg(required = true, value_name = "BAND=DB")]
         bands: Vec<String>,
+    },
+    /// Set the EQ pre-amp in dB. Range -6..6 in steps of 0.5. Does not change
+    /// whether the EQ is on.
+    Preamp {
+        #[arg(value_name = "-6..6", allow_hyphen_values = true)]
+        db: f32,
     },
 }
 

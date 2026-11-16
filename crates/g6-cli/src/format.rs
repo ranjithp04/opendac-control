@@ -137,7 +137,12 @@ fn write_profile(s: &mut String, p: &Profile) {
         .filter(|f| f.family == FAMILY_PLAYBACK && f.exposed && !is_eq_band(f))
     {
         if let Some(v) = p.get(f) {
-            let _ = writeln!(s, "  {:<18}{}", f.name, feature_display(f, v));
+            let label = if f.name == "eq_preamp" {
+                "eq pre-amp"
+            } else {
+                f.name
+            };
+            let _ = writeln!(s, "  {:<18}{}", label, feature_display(f, v));
         }
     }
     let bands: Vec<String> = p
@@ -160,7 +165,7 @@ fn write_profile(s: &mut String, p: &Profile) {
 }
 
 /// Status as JSON. Raw device values, except `mic_nr_level` which is shown
-/// 0..1. The EQ pre-amp is left out. `direct_mode` is added.
+/// 0..1 (the EQ pre-amp is `eq_preamp`, in dB). `direct_mode` is added.
 pub fn status_json(state: &DeviceState, direct_mode: bool) -> Result<String, serde_json::Error> {
     let mut v = serde_json::to_value(state)?;
     if let Some(obj) = v.as_object_mut() {
@@ -222,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn json_hides_preamp_and_scales_nr() {
+    fn json_has_preamp_and_scales_nr() {
         let mut st = DeviceState::new();
         st.output = Some(Output::Headphones);
         st.set_feature(f("eq_preamp"), -2.5);
@@ -232,12 +237,12 @@ mod tests {
         assert_eq!(v["direct_mode"], true);
         assert_eq!(v["output"], "headphones");
         assert_eq!(v["headphones"]["surround"], 1.0);
-        assert!(v["headphones"].get("eq_preamp").is_none());
+        assert_eq!(v["headphones"]["eq_preamp"], -2.5);
         assert_eq!(v["headphones"]["mic_nr_level"], 0.5);
     }
 
     #[test]
-    fn text_marks_active_output_and_skips_preamp() {
+    fn text_marks_active_output_and_shows_preamp() {
         let mut st = DeviceState::new();
         st.output = Some(Output::Speakers);
         st.set_feature(f("eq_preamp"), -2.5);
@@ -248,6 +253,7 @@ mod tests {
         assert!(t.contains("[headphones] (last known)"));
         assert!(t.contains("crystalizer       on"));
         assert!(t.contains("31=-1"));
-        assert!(!t.contains("preamp"));
+        assert!(t.contains("eq pre-amp        -2.5 dB"), "{t}");
+        assert!(!t.contains("eq_preamp"), "{t}");
     }
 }

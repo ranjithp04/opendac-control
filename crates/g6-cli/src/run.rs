@@ -6,7 +6,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use g6_core::direct::{self, DirectMode};
-use g6_core::events::{self, Change, Device, Event, Written};
+use g6_core::events::{self, Device, Event, Written};
 use g6_core::preset::{self, PresetStore};
 use g6_core::session::Session;
 use g6_core::state::DeviceState;
@@ -198,14 +198,13 @@ fn watch(env: &mut Env, out: &mut dyn Write) -> Result<(), CliError> {
     let begin = Instant::now();
     let deadline = env.watch_limit.map(|d| begin + d);
     // What was last shown: only changes are printed (the device repeats
-    // whole dumps), and the EQ pre-amp is never shown.
+    // whole dumps).
     let mut shown = DeviceState::new();
     loop {
         let wait = deadline.map_or(Duration::from_secs(3600), |d| {
             d.saturating_duration_since(Instant::now())
         });
         match events.recv_timeout(wait) {
-            Ok(Event::Changed(Change::Feature { feature, .. })) if !feature.exposed => {}
             Ok(e) if e != Event::Connected && !shown.apply(&e) => {}
             Ok(e) => {
                 if e == Event::Connected {
@@ -458,6 +457,18 @@ mod tests {
         assert_eq!(out, "eq_31: 3 dB\neq_1k: -1 dB\neq_16k: 0.5 dB\n");
         assert_eq!(raw(&rig.fake, "eq_31"), 3.0);
         assert_eq!(raw(&rig.fake, "eq_1k"), -1.0);
+        assert_eq!(
+            rig.exec(&["eq", "preamp", "-2.5"]).unwrap(),
+            "eq_preamp: -2.5 dB\n"
+        );
+        assert_eq!(raw(&rig.fake, "eq_preamp"), -2.5);
+        assert!(rig.exec(&["eq", "preamp", "6.5"]).is_err());
+        assert_eq!(raw(&rig.fake, "eq_preamp"), -2.5);
+        let text = rig.exec(&["status"]).unwrap();
+        assert!(text.contains("eq pre-amp        -2.5 dB"), "{text}");
+        let json = rig.exec(&["status", "--json"]).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["headphones"]["eq_preamp"], -2.5);
         assert_eq!(rig.exec(&["eq", "on"]).unwrap(), "eq: on\n");
         assert_eq!(raw(&rig.fake, "eq"), 1.0);
         assert_eq!(rig.exec(&["eq", "off"]).unwrap(), "eq: off\n");
@@ -506,7 +517,7 @@ mod tests {
         assert_eq!(v["dac_filter"], "fast-min");
         assert_eq!(v["mic_boost"], 30);
         assert_eq!(v["headphones"]["bass_level"], 0.3);
-        assert!(v["headphones"].get("eq_preamp").is_none());
+        assert_eq!(v["headphones"]["eq_preamp"], 0.0);
     }
 
     #[test]
@@ -629,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn watch_prints_only_changes_and_hides_the_preamp() {
+    fn watch_prints_only_changes_and_shows_the_preamp() {
         let rig = Rig::new();
         let mut env = rig.env();
         env.watch_limit = Some(Duration::from_millis(3000));
@@ -638,11 +649,18 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1500));
             fake.switch_output(Output::Speakers);
             fake.switch_output(Output::Speakers);
+            // A pushed pre-amp change (-2.5 dB), repeated: shown once.
+            fake.push_raw(&[
+                0x5a, 0x11, 0x08, 0x01, 0x00, 0x96, 0x0a, 0x00, 0x00, 0x20, 0xc0,
+            ]);
+            fake.push_raw(&[
+                0x5a, 0x11, 0x08, 0x01, 0x00, 0x96, 0x0a, 0x00, 0x00, 0x20, 0xc0,
+            ]);
         });
         let out = rig.exec_env(&mut env, &["watch"]).unwrap();
         t.join().unwrap();
         assert_eq!(out.matches("output: speakers").count(), 1, "{out}");
         assert!(out.matches("eq_31:").count() <= 1, "{out}");
-        assert!(!out.contains("eq_preamp"), "{out}");
+        assert_eq!(out.matches("eq_preamp: -2.5 dB").count(), 1, "{out}");
     }
 }

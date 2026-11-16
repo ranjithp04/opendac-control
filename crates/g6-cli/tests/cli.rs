@@ -120,6 +120,7 @@ fn every_subcommand_has_help() {
         &["eq", "on"],
         &["eq", "off"],
         &["eq", "set"],
+        &["eq", "preamp"],
         &["sbx"],
         &["scout"],
         &["surround"],
@@ -192,6 +193,11 @@ fn bad_input_exits_2_without_touching_the_device() {
         (&["eq", "set", "1k"], "BAND=DB"),
         (&["eq", "set", "1k=loud"], "not a number"),
         (&["eq", "set", "1k=1", "1000=2"], "twice"),
+        (&["eq", "preamp", "6.5"], "outside the range -6..6"),
+        (&["eq", "preamp", "-7"], "outside the range -6..6"),
+        (&["eq", "preamp", "1.2"], "multiple of 0.5"),
+        (&["eq", "preamp", "loud"], "invalid value"),
+        (&["eq", "preamp"], "required"),
         (&["surround", "2"], "outside the range"),
         (&["bass", "-0.1"], "outside the range"),
         (&["surround"], "on, off"),
@@ -252,7 +258,8 @@ fn bad_input_exits_2_without_touching_the_device() {
 }
 
 #[test]
-fn the_eq_preamp_cannot_be_set() {
+fn the_eq_preamp_is_not_an_eq_band() {
+    // It has its own command: `g6 eq preamp <dB>`.
     let o = g6(&["eq", "set", "preamp=1"]);
     assert_eq!(o.code(), 2);
     assert!(o.stderr().contains("unknown EQ band"), "{}", o.stderr());
@@ -314,7 +321,7 @@ fn loading_an_invalid_or_broken_preset_fails_before_the_device() {
     let home = Home::new();
     let dir = home.presets_dir();
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("preamp.json"), r#"{"headphones":{"eq_preamp":1}}"#).unwrap();
+    std::fs::write(dir.join("preamp.json"), r#"{"headphones":{"eq_preamp":7}}"#).unwrap();
     std::fs::write(dir.join("range.json"), r#"{"headphones":{"eq_31":99}}"#).unwrap();
     std::fs::write(dir.join("mic.json"), r#"{"headphones":{"mic_aec":1}}"#).unwrap();
     std::fs::write(dir.join("junk.json"), "not json").unwrap();

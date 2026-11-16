@@ -5,7 +5,8 @@
 //! **before** anything on the device is changed, so a crash or a failed
 //! write never loses the user's settings; then it switches Scout, SBX and EQ
 //! off. Disabling restores what was saved and deletes the file. The mic is
-//! never touched (the Voice Clarity bit of the mask is left alone).
+//! never touched (the Voice Clarity bit of the mask is left alone), and
+//! neither is the EQ pre-amp or any EQ band: only the EQ on/off switch.
 //!
 //! Playback settings are per output. The saved state therefore has one entry
 //! per output that was active while Direct Mode was on, and the mask is saved

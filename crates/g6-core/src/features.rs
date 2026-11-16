@@ -51,7 +51,9 @@ pub struct Feature {
     pub step: f32,
     /// Factor from device value to UI value (e.g. mic NR level device 0–0.5, UI ×2).
     pub ui_scale: f32,
-    /// `false` = readable but must not be exposed or written (EQ pre-amp).
+    /// `false` = readable but must not be exposed or written. Every feature in
+    /// the table is currently exposed; the flag is kept as a guard for any
+    /// feature that has to stay read-only.
     pub exposed: bool,
 }
 
@@ -195,10 +197,7 @@ pub static FEATURES: &[Feature] = &[
     boolean(P, 0x18, "bass"),
     level(P, 0x19, "bass_level"),
     boolean(P, 0x09, "eq"),
-    Feature {
-        exposed: false,
-        ..db(P, 0x0a, "eq_preamp", 6.0)
-    },
+    db(P, 0x0a, "eq_preamp", 6.0),
     db(P, 0x0b, "eq_31", 12.0),
     db(P, 0x0c, "eq_62", 12.0),
     db(P, 0x0d, "eq_125", 12.0),
@@ -434,16 +433,23 @@ mod tests {
     }
 
     #[test]
-    fn preamp_not_exposed() {
+    fn preamp_is_exposed_and_validated() {
         let p = by_name("eq_preamp").unwrap();
         assert_eq!((p.family, p.id), (0x96, 0x0a));
-        assert!(!p.exposed);
-        assert_eq!(p.validate(-2.5), Ok(-2.5));
-        assert_eq!(
-            p.validate_write(0.0),
-            Err(FeatureError::NotExposed("eq_preamp"))
-        );
-        assert!(FEATURES.iter().filter(|f| !f.exposed).count() == 1);
+        assert!(p.exposed);
+        assert_eq!(p.validate_write(-2.5), Ok(-2.5));
+        assert_eq!(p.validate_write(6.0), Ok(6.0));
+        assert_eq!(p.validate_write(-6.0), Ok(-6.0));
+        assert!(matches!(
+            p.validate_write(6.5),
+            Err(FeatureError::OutOfRange { .. })
+        ));
+        assert!(matches!(
+            p.validate_write(-6.5),
+            Err(FeatureError::OutOfRange { .. })
+        ));
+        assert!(!scout_owned(p));
+        assert!(FEATURES.iter().all(|f| f.exposed));
     }
 
     #[test]

@@ -8,9 +8,9 @@
 //! { "headphones": { "sbx": true, "eq": 1, "eq_31": 3, "surround": 1 } }
 //! ```
 //!
-//! Only playback features (family `0x96`, the per-output ones) are allowed,
-//! never the EQ pre-amp. [`apply`] writes the profile of the **active**
-//! output; mic, decoder, DAC filter and mic boost are not part of presets.
+//! Only playback features (family `0x96`, the per-output ones, including the
+//! EQ pre-amp `eq_preamp`) are allowed. [`apply`] writes the profile of the
+//! **active** output; mic, decoder, DAC filter and mic boost are not part of presets.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -353,7 +353,8 @@ mod tests {
         assert!(bad(&[("eq_1k", 12.0)]).is_ok());
         assert!(matches!(bad(&[("eq_1k", 12.5)]), Err(Error::Invalid(_))));
         assert!(matches!(bad(&[("nope", 1.0)]), Err(Error::Invalid(_))));
-        assert!(matches!(bad(&[("eq_preamp", 1.0)]), Err(Error::Invalid(_))));
+        assert!(bad(&[("eq_preamp", -6.0)]).is_ok());
+        assert!(matches!(bad(&[("eq_preamp", 6.5)]), Err(Error::Invalid(_))));
         assert!(matches!(bad(&[("mic_aec", 1.0)]), Err(Error::Invalid(_))));
         assert!(matches!(
             bad(&[("surround_distance", 5.0)]),
@@ -398,7 +399,7 @@ mod tests {
         assert!(matches!(s.save("bad", &bad), Err(Error::Invalid(_))));
         std::fs::write(
             s.dir().join("bad.json"),
-            r#"{"headphones":{"eq_preamp":1}}"#,
+            r#"{"headphones":{"eq_preamp":7}}"#,
         )
         .unwrap();
         assert!(matches!(s.load("bad"), Err(Error::Invalid(_))));
@@ -566,8 +567,8 @@ mod tests {
         assert_eq!(h.scout, Some(false));
         assert_eq!(h.features["eq_250"], 1.5);
         assert!(
-            !h.features.contains_key("eq_preamp"),
-            "pre-amp is never saved"
+            h.features.contains_key("eq_preamp"),
+            "pre-amp is saved with the profile"
         );
         assert!(!h.features.contains_key("mic_aec"));
         assert!(

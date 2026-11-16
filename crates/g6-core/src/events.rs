@@ -836,7 +836,7 @@ mod tests {
             Err(Error::Protocol(_))
         ));
         assert!(matches!(
-            d.write_feature(feat("eq_preamp"), 1.0),
+            d.write_feature(feat("eq_preamp"), 6.5),
             Err(Error::Protocol(_))
         ));
         assert_eq!(writes_with_cmd(&dev, cmd::FEATURE_WRITE), 0);

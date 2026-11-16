@@ -983,7 +983,7 @@ mod tests {
     }
 
     #[test]
-    fn reapply_skips_features_the_user_may_not_write() {
+    fn reapply_writes_the_pre_amp_with_the_other_features() {
         let fake = FakeDevice::new();
         let (dev, _rx) = crate::state::tests::start(&fake);
         let mut have = DeviceState::new();
@@ -995,11 +995,11 @@ mod tests {
         assert_eq!(
             r,
             Reapplied {
-                writes: 1,
+                writes: 2,
                 failures: vec![]
             }
         );
-        assert_eq!(get(&fake, "eq_preamp"), 0.0);
+        assert_eq!(get(&fake, "eq_preamp"), 5.0);
         assert_eq!(get(&fake, "bass"), 1.0);
     }
 

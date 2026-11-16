@@ -1,0 +1,28 @@
+[package]
+name = "opendac-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Menu bar app for the Creative Sound BlasterX G6"
+build = "build.rs"
+
+[lib]
+name = "opendac_control_app"
+
+[[bin]]
+name = "opendac-control"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.7.5", features = [] }
+
+[dependencies]
+g6-core = { path = "../../crates/g6-core" }
+tauri = { version = "2.12.6", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2.5.5"
+tauri-plugin-autostart = "2.7.0"
+serde = { version = "1.0.229", features = ["derive"] }
+log = "0.4.35"
+
+[dev-dependencies]
+serde_json = "1.0.154"
