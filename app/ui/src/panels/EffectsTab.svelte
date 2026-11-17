@@ -1,8 +1,7 @@
 <script lang="ts">
   import { app } from '../lib/store.svelte';
-  import type { EffectName, SmartVolumeMode } from '../lib/api';
+  import type { EffectName } from '../lib/api';
   import Toggle from '../components/Toggle.svelte';
-  import Segmented from '../components/Segmented.svelte';
   import SliderRow from '../components/SliderRow.svelte';
 
   const st = $derived(app.state);
@@ -15,11 +14,6 @@
     ['bass', 'Bass'],
     ['dialog', 'Dialog+'],
     ['smartVolume', 'Smart Volume'],
-  ];
-  const MODES: { value: SmartVolumeMode; label: string }[] = [
-    { value: 'normal', label: 'Normal' },
-    { value: 'loud', label: 'Loud' },
-    { value: 'night', label: 'Night' },
   ];
 
   const level = (v: number) => Math.round(v * 100);
@@ -67,16 +61,6 @@
           label="Surround distance"
           format={String}
           oncommit={(distance) => app.run('set_surround_distance', { distance })}
-        />
-      {/if}
-      {#if key === 'smartVolume'}
-        <Segmented
-          options={MODES}
-          value={st.effects.smartVolume.mode}
-          label="Smart Volume mode"
-          height={28}
-          fontSize={11}
-          onpick={(mode) => app.run('set_smart_volume_mode', { mode })}
         />
       {/if}
     </div>
