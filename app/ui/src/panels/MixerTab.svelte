@@ -67,8 +67,8 @@
     {/if}
   {/each}
   <p class="note">
-    The G6's USB audio controls as the operating system offers them (not the G6's own protocol). The system
-    shows one recording and one monitoring level, not one per input.
+    The G6's USB audio controls as the operating system offers them (not the G6's own protocol). Recording
+    and monitoring follow the selected source.
   </p>
 </div>
 

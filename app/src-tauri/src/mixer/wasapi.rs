@@ -391,6 +391,9 @@ impl Monitor {
 
 // --- Diagnostic dump ----------------------------------------------------
 
+/// Set this environment variable to write the audio topology at start-up.
+const DUMP_VAR: &str = "OPENDAC_MIXER_DUMP";
+
 fn dump_part(out: &mut String, part: &IPart, depth: usize, incoming: bool, seen: &mut Vec<String>) {
     use std::fmt::Write;
     let indent = "  ".repeat(depth);
@@ -587,29 +590,32 @@ impl MixerBackend for WasapiMixer {
     }
 
     fn subscribe(&self, notify: Notify) {
-        // Temporary diagnostic: always written, in the temp folder and next to the program.
-        let _ = std::thread::Builder::new()
-            .name("mixer-dump".into())
-            .spawn(|| {
-                let text = std::panic::catch_unwind(|| with_com(topology_dump))
-                    .unwrap_or_else(|_| "the topology dump panicked\n".into());
-                let text = format!("opendac-control {}\n{text}", env!("CARGO_PKG_VERSION"));
-                let name = "opendac-mixer-topology.txt";
-                let mut dirs = vec![std::env::temp_dir()];
-                if let Some(dir) = std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-                {
-                    dirs.push(dir);
-                }
-                for dir in dirs {
-                    let path = dir.join(name);
-                    match std::fs::write(&path, &text) {
-                        Ok(()) => log::info!("mixer: topology written to {}", path.display()),
-                        Err(e) => log::warn!("mixer: cannot write {}: {e}", path.display()),
+        // Diagnostic: with OPENDAC_MIXER_DUMP set, write the audio topology next to the program and
+        // to the temp folder (what Windows shows for the G6).
+        if std::env::var_os(DUMP_VAR).is_some() {
+            let _ = std::thread::Builder::new()
+                .name("mixer-dump".into())
+                .spawn(|| {
+                    let text = std::panic::catch_unwind(|| with_com(topology_dump))
+                        .unwrap_or_else(|_| "the topology dump panicked\n".into());
+                    let text = format!("opendac-control {}\n{text}", env!("CARGO_PKG_VERSION"));
+                    let name = "opendac-mixer-topology.txt";
+                    let mut dirs = vec![std::env::temp_dir()];
+                    if let Some(dir) = std::env::current_exe()
+                        .ok()
+                        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                    {
+                        dirs.push(dir);
                     }
-                }
-            });
+                    for dir in dirs {
+                        let path = dir.join(name);
+                        match std::fs::write(&path, &text) {
+                            Ok(()) => log::info!("mixer: topology written to {}", path.display()),
+                            Err(e) => log::warn!("mixer: cannot write {}: {e}", path.display()),
+                        }
+                    }
+                });
+        }
         let notify: Arc<dyn Fn() + Send + Sync> = Arc::from(notify);
         let spawned = std::thread::Builder::new()
             .name("mixer-wasapi".into())
