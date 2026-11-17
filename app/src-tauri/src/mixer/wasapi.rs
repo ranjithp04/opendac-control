@@ -6,10 +6,12 @@
 //! Sound control panel shows; the class driver maps it to the USB feature
 //! unit on the endpoint's signal path. That gives playback and recording.
 //!
-//! The recording source is the input selector (`IAudioInputSelector`) found by
-//! walking the capture endpoint's device topology upstream, toward the
-//! hardware. Windows has no generic "monitoring" (play-through) control for a
-//! USB device, so `monitoring` is always `null` here.
+//! With the Creative driver the G6 shows one capture endpoint per input (Line In, External Mic,
+//! SPDIF In, What U Hear) and one shared input selector. The recording source is that selector, and
+//! recording is the selected input's endpoint. Monitoring is the selected input's own volume and mute
+//! on its way to the speakers (IAudioVolumeLevel / IAudioMute on the parts of the signal path); What
+//! U Hear has none. Monitoring changes made elsewhere are not announced (parts have no endpoint
+//! callbacks here), they show on the next read.
 //!
 //! The G6's endpoints are found by the USB id (`vid_041e&pid_3256`) in the
 //! device id the endpoint's connector is attached to, falling back to the
@@ -28,10 +30,10 @@ use windows::Win32::Media::Audio::Endpoints::{
     IAudioEndpointVolume, IAudioEndpointVolumeCallback, IAudioEndpointVolumeCallback_Impl,
 };
 use windows::Win32::Media::Audio::{
-    eCapture, eConsole, eRender, EDataFlow, ERole, IAudioInputSelector, IConnector,
-    IDeviceTopology, IMMDevice, IMMDeviceEnumerator, IMMNotificationClient,
-    IMMNotificationClient_Impl, IPart, MMDeviceEnumerator, Subunit, AUDIO_VOLUME_NOTIFICATION_DATA,
-    DEVICE_STATE, DEVICE_STATE_ACTIVE,
+    eCapture, eConsole, eRender, EDataFlow, ERole, IAudioInputSelector, IAudioMute,
+    IAudioVolumeLevel, IConnector, IDeviceTopology, IMMDevice, IMMDeviceEnumerator,
+    IMMNotificationClient, IMMNotificationClient_Impl, IPart, MMDeviceEnumerator, Subunit,
+    AUDIO_VOLUME_NOTIFICATION_DATA, DEVICE_STATE, DEVICE_STATE_ACTIVE,
 };
 use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
 use windows::Win32::System::Com::{
@@ -141,14 +143,21 @@ fn device_id(device: &IMMDevice) -> Option<String> {
     unsafe { device.GetId().ok() }.map(take_string)
 }
 
-/// The G6's active endpoint for `flow`: the system default one when that is a G6, else the first.
-fn g6_endpoint(en: &IMMDeviceEnumerator, flow: EDataFlow) -> Option<IMMDevice> {
-    let list = unsafe { en.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE) }.ok()?;
-    let count = unsafe { list.GetCount() }.ok()?;
-    let found: Vec<IMMDevice> = (0..count)
+/// All of the G6's active endpoints for `flow`.
+fn g6_endpoints(en: &IMMDeviceEnumerator, flow: EDataFlow) -> Vec<IMMDevice> {
+    let Ok(list) = (unsafe { en.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE) }) else {
+        return Vec::new();
+    };
+    let count = unsafe { list.GetCount() }.unwrap_or(0);
+    (0..count)
         .filter_map(|i| unsafe { list.Item(i) }.ok())
         .filter(is_g6)
-        .collect();
+        .collect()
+}
+
+/// The G6's endpoint for `flow`: the system default one when that is a G6, else the first.
+fn g6_endpoint(en: &IMMDeviceEnumerator, flow: EDataFlow) -> Option<IMMDevice> {
+    let found = g6_endpoints(en, flow);
     let default = unsafe { en.GetDefaultAudioEndpoint(flow, eConsole) }
         .ok()
         .and_then(|d| device_id(&d));
@@ -176,27 +185,13 @@ fn level(device: &IMMDevice) -> Option<MixerLevel> {
     }
 }
 
-// --- Recording source ---------------------------------------------------
-
-/// The input selector upstream of `part` (toward the hardware), and the part it is.
-fn find_selector(part: &IPart, depth: u32) -> Option<(IAudioInputSelector, IPart)> {
-    if depth > MAX_TOPOLOGY_DEPTH {
-        return None;
-    }
-    if unsafe { part.GetPartType() }.is_ok_and(|t| t == Subunit) {
-        let mut raw: *mut c_void = ptr::null_mut();
-        let activated =
-            unsafe { part.Activate(CLSCTX_ALL.0, &IAudioInputSelector::IID, Some(&mut raw)) };
-        if activated.is_ok() && !raw.is_null() {
-            return Some((unsafe { IAudioInputSelector::from_raw(raw) }, part.clone()));
-        }
-    }
-    let upstream = unsafe { part.EnumPartsIncoming() }.ok()?;
-    let count = unsafe { upstream.GetCount() }.ok()?;
-    (0..count)
-        .filter_map(|i| unsafe { upstream.GetPart(i) }.ok())
-        .find_map(|p| find_selector(&p, depth + 1))
-}
+// --- Topology: recording sources and monitoring ------------------------
+//
+// Seen on a G6 with the Creative driver (docs/protocol-g6.md, "Mixer"): each input (Line In,
+// External Mic, SPDIF In, What U Hear) is its own capture endpoint. Its path runs from the
+// input's connector through an ADC, a recording volume and a mute into one shared input selector
+// (the "Mux"), which feeds the host. Line In, External Mic and SPDIF In also have a second path,
+// through their own volume and mute into the "Sum" in front of the speakers: that is monitoring.
 
 /// The connector of an endpoint's signal path on the adapter side, as a part.
 fn adapter_part(device: &IMMDevice) -> Option<IPart> {
@@ -206,42 +201,192 @@ fn adapter_part(device: &IMMDevice) -> Option<IPart> {
     adapter_side.cast().ok()
 }
 
-/// The selector of a capture endpoint, with the part that holds it.
-fn selector_of(device: &IMMDevice) -> Option<(IAudioInputSelector, IPart)> {
-    find_selector(&adapter_part(device)?, 0)
+/// A control interface of a part (volume, mute, selector), if it has it.
+fn activate<T: Interface>(part: &IPart) -> Option<T> {
+    let mut raw: *mut c_void = ptr::null_mut();
+    unsafe { part.Activate(CLSCTX_ALL.0, &T::IID, Some(&mut raw)) }.ok()?;
+    (!raw.is_null()).then(|| unsafe { T::from_raw(raw) })
 }
 
-/// The inputs a selector chooses between: the local id and name of each part feeding it.
-fn selector_options(part: &IPart) -> Vec<MixerSource> {
-    let Ok(list) = (unsafe { part.EnumPartsIncoming() }) else {
+/// The parts one step away from `part`.
+fn neighbours(part: &IPart, incoming: bool) -> Vec<IPart> {
+    let list = unsafe {
+        if incoming {
+            part.EnumPartsIncoming()
+        } else {
+            part.EnumPartsOutgoing()
+        }
+    };
+    let Ok(list) = list else {
         return Vec::new();
     };
-    let count = unsafe { list.GetCount() }.unwrap_or(0);
-    (0..count)
-        .filter_map(|i| {
-            let p = unsafe { list.GetPart(i) }.ok()?;
-            let id = unsafe { p.GetLocalId() }.ok()?;
-            let name = take_string(unsafe { p.GetName() }.ok()?);
-            Some(MixerSource {
-                id,
-                name: if name.is_empty() {
-                    format!("Input {id}")
-                } else {
-                    name
-                },
-            })
-        })
+    (0..unsafe { list.GetCount() }.unwrap_or(0))
+        .filter_map(|i| unsafe { list.GetPart(i) }.ok())
         .collect()
 }
 
-fn sources(device: &IMMDevice) -> Option<MixerSources> {
-    let (selector, part) = selector_of(device)?;
-    let options = selector_options(&part);
-    if options.is_empty() {
+/// The input selector downstream of `part`, and the local id of the part that feeds it on this path.
+fn find_mux(part: &IPart, depth: u32) -> Option<(IAudioInputSelector, u32)> {
+    if depth > MAX_TOPOLOGY_DEPTH {
         return None;
     }
-    let current = unsafe { selector.GetSelection() }.ok()?;
-    Some(MixerSources { current, options })
+    for child in neighbours(part, false) {
+        if unsafe { child.GetPartType() }.is_ok_and(|t| t == Subunit) {
+            if let Some(selector) = activate::<IAudioInputSelector>(&child) {
+                return Some((selector, unsafe { part.GetLocalId() }.ok()?));
+            }
+        }
+        if let Some(found) = find_mux(&child, depth + 1) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// One recording source: its capture endpoint and the id the selector knows it by.
+struct Source {
+    id: u32,
+    name: String,
+    device: IMMDevice,
+    /// The input's connector on the adapter side.
+    connector: IPart,
+}
+
+/// The G6's recording sources and the selector that chooses between them.
+struct Sources {
+    selector: IAudioInputSelector,
+    list: Vec<Source>,
+    /// The id the selector reports as selected.
+    current: Option<u32>,
+}
+
+impl Sources {
+    fn find(en: &IMMDeviceEnumerator) -> Option<Sources> {
+        let mut selector = None;
+        let mut list = Vec::new();
+        for device in g6_endpoints(en, eCapture) {
+            let Some(connector) = adapter_part(&device) else {
+                continue;
+            };
+            let Some((sel, id)) = find_mux(&connector, 0) else {
+                continue;
+            };
+            let Ok(name) = (unsafe { connector.GetName() }) else {
+                continue;
+            };
+            selector.get_or_insert(sel);
+            list.push(Source {
+                id,
+                name: take_string(name),
+                device,
+                connector,
+            });
+        }
+        let selector = selector?;
+        let current = unsafe { selector.GetSelection() }.ok();
+        (!list.is_empty()).then_some(Sources {
+            selector,
+            list,
+            current,
+        })
+    }
+
+    fn selected(&self) -> Option<&Source> {
+        self.list.iter().find(|s| Some(s.id) == self.current)
+    }
+
+    fn wire(&self) -> Option<MixerSources> {
+        Some(MixerSources {
+            current: self.current?,
+            options: self
+                .list
+                .iter()
+                .map(|s| MixerSource {
+                    id: s.id,
+                    name: s.name.clone(),
+                })
+                .collect(),
+        })
+    }
+}
+
+/// An input's level on its way to the speakers: a volume (in dB) and a mute part.
+struct Monitor {
+    volume: IAudioVolumeLevel,
+    mute: Option<IAudioMute>,
+}
+
+/// Scalar 0..1 for a level in dB, linear in dB over the part's range.
+fn db_to_scalar(db: f32, min: f32, max: f32) -> f32 {
+    if max > min {
+        ((db - min) / (max - min)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn scalar_to_db(scalar: f32, min: f32, max: f32) -> f32 {
+    min + scalar.clamp(0.0, 1.0) * (max - min)
+}
+
+impl Monitor {
+    /// The first volume and mute on the path from the input's connector to the speakers' connector.
+    fn find(source: &Source, render: &IMMDevice) -> Option<Monitor> {
+        let to = adapter_part(render)?;
+        let topology = unsafe { source.connector.GetTopologyObject() }.ok()?;
+        let path = unsafe { topology.GetSignalPath(&source.connector, &to, false) }.ok()?;
+        let (mut volume, mut mute) = (None, None);
+        for i in 0..unsafe { path.GetCount() }.unwrap_or(0) {
+            let Ok(part) = (unsafe { path.GetPart(i) }) else {
+                continue;
+            };
+            volume = volume.or_else(|| activate::<IAudioVolumeLevel>(&part));
+            mute = mute.or_else(|| activate::<IAudioMute>(&part));
+        }
+        Some(Monitor {
+            volume: volume?,
+            mute,
+        })
+    }
+
+    fn range(&self) -> Option<(f32, f32)> {
+        let (mut min, mut max, mut step) = (0.0, 0.0, 0.0);
+        unsafe { self.volume.GetLevelRange(0, &mut min, &mut max, &mut step) }.ok()?;
+        (max > min).then_some((min, max))
+    }
+
+    fn level(&self) -> Option<MixerLevel> {
+        let (min, max) = self.range()?;
+        let db = unsafe { self.volume.GetLevel(0) }.ok()?;
+        Some(MixerLevel {
+            volume: db_to_scalar(db, min, max),
+            volume_db: Some(db),
+            mute: self
+                .mute
+                .as_ref()
+                .and_then(|m| unsafe { m.GetMute() }.ok())
+                .map(|m| m.as_bool()),
+        })
+    }
+
+    fn set_volume(&self, scalar: f32) -> Result<(), MixerError> {
+        let (min, max) = self
+            .range()
+            .ok_or_else(|| unavailable("the monitoring level has no range"))?;
+        unsafe {
+            self.volume
+                .SetLevelUniform(scalar_to_db(scalar, min, max), None)
+        }
+        .map_err(|e| failed("set monitoring level", e))
+    }
+
+    fn set_mute(&self, mute: bool) -> Result<(), MixerError> {
+        let m = self
+            .mute
+            .as_ref()
+            .ok_or_else(|| unavailable("the monitoring level has no mute"))?;
+        unsafe { m.SetMute(mute, None) }.map_err(|e| failed("set monitoring mute", e))
+    }
 }
 
 // --- Diagnostic dump ----------------------------------------------------
@@ -341,35 +486,61 @@ fn topology_dump() -> String {
 
 pub struct WasapiMixer;
 
-fn endpoint_for(scope: MixerScope) -> Result<IMMDevice, MixerError> {
-    let flow = match scope {
-        MixerScope::Playback => eRender,
-        MixerScope::Recording => eCapture,
-        MixerScope::Monitoring => {
-            return Err(unavailable(
-                "Windows has no hardware monitoring control for the G6",
-            ))
-        }
-    };
-    g6_endpoint(&enumerator()?, flow)
-        .ok_or_else(|| unavailable("the G6 audio device was not found"))
+/// What the G6 offers right now, looked up afresh for every call.
+struct Ctx {
+    render: Option<IMMDevice>,
+    sources: Option<Sources>,
+    /// Capture endpoint of the selected source, else the system default one.
+    capture: Option<IMMDevice>,
+}
+
+impl Ctx {
+    fn new() -> Result<Ctx, MixerError> {
+        let en = enumerator()?;
+        let sources = Sources::find(&en);
+        let capture = sources
+            .as_ref()
+            .and_then(Sources::selected)
+            .map(|s| s.device.clone())
+            .or_else(|| g6_endpoint(&en, eCapture));
+        Ok(Ctx {
+            render: g6_endpoint(&en, eRender),
+            sources,
+            capture,
+        })
+    }
+
+    fn monitor(&self) -> Option<Monitor> {
+        let source = self.sources.as_ref()?.selected()?;
+        Monitor::find(source, self.render.as_ref()?)
+    }
+
+    /// The endpoint whose master volume and mute `scope` is.
+    fn endpoint(&self, scope: MixerScope) -> Result<&IMMDevice, MixerError> {
+        let device = match scope {
+            MixerScope::Playback => &self.render,
+            MixerScope::Recording => &self.capture,
+            MixerScope::Monitoring => &None,
+        };
+        device
+            .as_ref()
+            .ok_or_else(|| unavailable("the G6 audio device was not found"))
+    }
 }
 
 impl MixerBackend for WasapiMixer {
     fn read(&self) -> Option<Mixer> {
         with_com(|| {
-            let en = enumerator().ok()?;
-            let render = g6_endpoint(&en, eRender);
-            let capture = g6_endpoint(&en, eCapture);
-            let playback = render.as_ref().and_then(level);
-            let recording = capture.as_ref().and_then(level);
+            let ctx = Ctx::new().ok()?;
+            let playback = ctx.render.as_ref().and_then(level);
+            let recording = ctx.capture.as_ref().and_then(level);
             if playback.is_none() && recording.is_none() {
                 return None;
             }
             Some(Mixer {
                 playback,
-                monitoring: None,
-                recording_source: capture.as_ref().and_then(sources),
+                monitoring: ctx.monitor().and_then(|m| m.level()),
+                recording_source: ctx.sources.as_ref().and_then(Sources::wire),
                 recording,
             })
         })
@@ -377,7 +548,14 @@ impl MixerBackend for WasapiMixer {
 
     fn set_volume(&self, scope: MixerScope, volume: f32) -> Result<(), MixerError> {
         with_com(|| {
-            let v = volume_of(&endpoint_for(scope)?)?;
+            let ctx = Ctx::new()?;
+            if scope == MixerScope::Monitoring {
+                let m = ctx
+                    .monitor()
+                    .ok_or_else(|| unavailable("this input has no monitoring control"))?;
+                return m.set_volume(volume);
+            }
+            let v = volume_of(ctx.endpoint(scope)?)?;
             unsafe { v.SetMasterVolumeLevelScalar(volume, ptr::null()) }
                 .map_err(|e| failed("set volume", e))
         })
@@ -385,17 +563,26 @@ impl MixerBackend for WasapiMixer {
 
     fn set_mute(&self, scope: MixerScope, mute: bool) -> Result<(), MixerError> {
         with_com(|| {
-            let v = volume_of(&endpoint_for(scope)?)?;
+            let ctx = Ctx::new()?;
+            if scope == MixerScope::Monitoring {
+                let m = ctx
+                    .monitor()
+                    .ok_or_else(|| unavailable("this input has no monitoring control"))?;
+                return m.set_mute(mute);
+            }
+            let v = volume_of(ctx.endpoint(scope)?)?;
             unsafe { v.SetMute(mute, ptr::null()) }.map_err(|e| failed("set mute", e))
         })
     }
 
     fn set_source(&self, id: u32) -> Result<(), MixerError> {
         with_com(|| {
-            let device = endpoint_for(MixerScope::Recording)?;
-            let (selector, _) = selector_of(&device)
+            let sources = Sources::find(&enumerator()?)
                 .ok_or_else(|| unavailable("the G6 offers no recording source selector"))?;
-            unsafe { selector.SetSelection(id, None) }.map_err(|e| failed("set source", e))
+            if !sources.list.iter().any(|s| s.id == id) {
+                return Err(unavailable("unknown recording source"));
+            }
+            unsafe { sources.selector.SetSelection(id, None) }.map_err(|e| failed("set source", e))
         })
     }
 
@@ -497,7 +684,7 @@ impl Drop for Watch {
 fn watch_endpoints(en: &IMMDeviceEnumerator, tx: &Sender<Event>) -> Vec<Watch> {
     [eRender, eCapture]
         .into_iter()
-        .filter_map(|flow| g6_endpoint(en, flow))
+        .flat_map(|flow| g6_endpoints(en, flow))
         .filter_map(|device| {
             let volume = volume_of(&device).ok()?;
             let callback: IAudioEndpointVolumeCallback = VolumeEvents(tx.clone()).into();
@@ -553,9 +740,13 @@ mod tests {
     }
 
     #[test]
-    fn monitoring_is_not_offered() {
-        let m = WasapiMixer;
-        let e = m.set_volume(MixerScope::Monitoring, 0.5).unwrap_err();
-        assert!(matches!(e, MixerError::Unavailable(_)));
+    fn level_conversion_is_linear_in_db_and_clamped() {
+        assert_eq!(db_to_scalar(-48.0, -48.0, 9.0), 0.0);
+        assert_eq!(db_to_scalar(9.0, -48.0, 9.0), 1.0);
+        assert_eq!(db_to_scalar(-19.5, -48.0, 9.0), 0.5);
+        assert_eq!(db_to_scalar(20.0, -48.0, 9.0), 1.0);
+        assert_eq!(db_to_scalar(0.0, 0.0, 0.0), 0.0);
+        assert_eq!(scalar_to_db(0.5, -48.0, 9.0), -19.5);
+        assert_eq!(scalar_to_db(2.0, -48.0, 9.0), 9.0);
     }
 }
