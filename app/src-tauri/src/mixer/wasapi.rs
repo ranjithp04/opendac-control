@@ -246,10 +246,6 @@ fn sources(device: &IMMDevice) -> Option<MixerSources> {
 
 // --- Diagnostic dump ----------------------------------------------------
 
-/// Set this environment variable to write the audio topology to `opendac-mixer-topology.txt` in
-/// the temp folder at start-up: what Windows shows for the G6, to see which controls it offers.
-const DUMP_VAR: &str = "OPENDAC_MIXER_DUMP";
-
 fn dump_part(out: &mut String, part: &IPart, depth: usize, incoming: bool, seen: &mut Vec<String>) {
     use std::fmt::Write;
     let indent = "  ".repeat(depth);
@@ -404,18 +400,29 @@ impl MixerBackend for WasapiMixer {
     }
 
     fn subscribe(&self, notify: Notify) {
-        if std::env::var_os(DUMP_VAR).is_some() {
-            let _ = std::thread::Builder::new()
-                .name("mixer-dump".into())
-                .spawn(|| {
-                    let text = with_com(topology_dump);
-                    let path = std::env::temp_dir().join("opendac-mixer-topology.txt");
-                    match std::fs::write(&path, text) {
+        // Temporary diagnostic: always written, in the temp folder and next to the program.
+        let _ = std::thread::Builder::new()
+            .name("mixer-dump".into())
+            .spawn(|| {
+                let text = std::panic::catch_unwind(|| with_com(topology_dump))
+                    .unwrap_or_else(|_| "the topology dump panicked\n".into());
+                let text = format!("opendac-control {}\n{text}", env!("CARGO_PKG_VERSION"));
+                let name = "opendac-mixer-topology.txt";
+                let mut dirs = vec![std::env::temp_dir()];
+                if let Some(dir) = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                {
+                    dirs.push(dir);
+                }
+                for dir in dirs {
+                    let path = dir.join(name);
+                    match std::fs::write(&path, &text) {
                         Ok(()) => log::info!("mixer: topology written to {}", path.display()),
                         Err(e) => log::warn!("mixer: cannot write {}: {e}", path.display()),
                     }
-                });
-        }
+                }
+            });
         let notify: Arc<dyn Fn() + Send + Sync> = Arc::from(notify);
         let spawned = std::thread::Builder::new()
             .name("mixer-wasapi".into())
