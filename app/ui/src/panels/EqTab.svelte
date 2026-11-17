@@ -159,6 +159,7 @@
             min={-12}
             max={12}
             step={0.5}
+            height={120}
             label="{l} Hz"
             bind:live={liveBands[i]}
             disabled={scout}
@@ -332,7 +333,7 @@
     gap: 6px;
     padding: 0 6px 4px;
     /* Many saved curves scroll here instead of pushing the sliders down. */
-    max-height: 62px;
+    max-height: 98px;
     overflow-y: auto;
   }
   .chipwrap {

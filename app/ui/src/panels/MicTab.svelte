@@ -30,6 +30,12 @@
   let curveName = $state('');
   const canSave = $derived(curveName.trim().length > 0);
 
+  // On failure the store shows the reason and the select goes back to the current curve.
+  async function pick(el: HTMLSelectElement) {
+    const c = curves[Number(el.value)];
+    if (!c) return;
+    if ((await app.run('apply_mic_eq_curve', { bands: c.bands })) === undefined) el.value = String(selected);
+  }
   function focusOnMount(node: HTMLElement) {
     node.focus();
   }
@@ -101,33 +107,24 @@
       </div>
       <Toggle on={m.eqEnabled} label="Mic EQ" onchange={(enabled) => app.run('set_mic_eq_enabled', { enabled })} />
     </div>
-    <div class="chips" role="group" aria-label="Mic EQ presets">
-      {#each curves as c, i (c.name)}
-        {@const user = i >= MIC_BUILTIN_CURVES.length}
-        <span class="chipwrap" class:user>
-          <button
-            type="button"
-            class="chip"
-            class:sel={i === selected}
-            aria-pressed={i === selected}
-            onclick={() => app.run('apply_mic_eq_curve', { bands: c.bands })}
-          >
-            {c.name}
-          </button>
-          {#if user}
-            <button
-              type="button"
-              class="del"
-              aria-label="Delete curve {c.name}"
-              onclick={() => app.run('delete_mic_eq_curve', { name: c.name })}
-            >
-              ×
-            </button>
-          {/if}
-        </span>
-      {/each}
-      {#if selected === -1}
-        <span class="chip sel custom" aria-current="true">{MIC_CUSTOM_NAME}</span>
+    <div class="pick">
+      <select aria-label="Mic EQ preset" value={String(selected)} onchange={(e) => pick(e.currentTarget)}>
+        {#if selected === -1}
+          <option value="-1" disabled>{MIC_CUSTOM_NAME}</option>
+        {/if}
+        {#each curves as c, i (c.name)}
+          <option value={String(i)}>{c.name}</option>
+        {/each}
+      </select>
+      {#if selected >= MIC_BUILTIN_CURVES.length}
+        <button
+          type="button"
+          class="btn"
+          aria-label="Delete curve {curves[selected].name}"
+          onclick={() => app.run('delete_mic_eq_curve', { name: curves[selected].name })}
+        >
+          Delete
+        </button>
       {/if}
     </div>
     <div class="bands">
@@ -139,7 +136,7 @@
             min={-12}
             max={12}
             step={0.5}
-            height={64}
+            height={84}
             label="Mic EQ band {l}"
             bind:live={liveBands[i]}
             oncommit={(gain) => app.run('set_mic_eq_band', { band: i, gain })}
@@ -241,64 +238,20 @@
     color: var(--text-2);
     font-size: 11px;
   }
-  .chips {
+  .pick {
     display: flex;
-    flex-wrap: wrap;
     gap: 6px;
-    /* Many saved curves scroll here instead of pushing the sliders down. */
-    max-height: 58px;
-    overflow-y: auto;
   }
-  .chipwrap {
-    display: inline-flex;
-    align-items: stretch;
-  }
-  .chip {
-    height: 26px;
-    padding: 0 10px;
-    display: inline-flex;
-    align-items: center;
-    border-radius: 13px;
+  select {
+    flex: 1;
+    min-width: 0;
+    height: 30px;
+    padding: 0 8px;
+    border-radius: 8px;
     border: 1px solid var(--border-2);
-    background: transparent;
-    color: var(--text-3);
-    font-size: 11px;
-    font-weight: 500;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .chip.sel {
-    border-color: var(--acc);
-    background: var(--border-2);
+    background: var(--card);
     color: var(--text);
-  }
-  .chip.custom {
-    cursor: default;
-  }
-  .user .chip {
-    border-top-right-radius: 0;
-    border-bottom-right-radius: 0;
-    border-right: none;
-    padding-right: 6px;
-  }
-  .del {
-    width: 22px;
-    border: 1px solid var(--border-2);
-    border-left: none;
-    border-radius: 0 13px 13px 0;
-    background: transparent;
-    color: var(--text-2);
-    font-size: 13px;
-    line-height: 1;
-    padding: 0 2px 0 0;
-    cursor: pointer;
-  }
-  .del:hover {
-    color: var(--text);
-  }
-  .user:has(.chip.sel) .del {
-    border-color: var(--acc);
-    background: var(--border-2);
+    font-size: 12px;
   }
   .bands {
     display: grid;
