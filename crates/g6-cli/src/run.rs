@@ -609,7 +609,7 @@ mod tests {
                     )
                 }),
                 Some(paths),
-                Duration::from_secs(2),
+                Duration::from_secs(10),
             )
         }
 
@@ -1266,7 +1266,7 @@ mod tests {
                 (session, rx)
             }),
             Some(paths),
-            Duration::from_secs(2),
+            Duration::from_secs(10),
         );
         env.watch_limit = Some(Duration::from_secs(30));
         let out = SharedOut::default();

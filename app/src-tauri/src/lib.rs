@@ -165,14 +165,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building the OpenDAC Control app");
 
-    app.run(|app, event| match event {
-        // Keeps running with the window closed; only Quit exits.
-        tauri::RunEvent::ExitRequested { api, code, .. } if code.is_none() => {
-            api.prevent_exit();
-        }
-        // Dock icon clicked while the window is hidden.
-        #[cfg(target_os = "macos")]
-        tauri::RunEvent::Reopen { .. } => panel::show(app),
-        _ => {}
-    });
+    app.run(
+        |#[cfg_attr(not(target_os = "macos"), allow(unused_variables))] app, event| match event {
+            // Keeps running with the window closed; only Quit exits.
+            tauri::RunEvent::ExitRequested { api, code, .. } if code.is_none() => {
+                api.prevent_exit();
+            }
+            // Dock icon clicked while the window is hidden.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => panel::show(app),
+            _ => {}
+        },
+    );
 }

@@ -894,6 +894,9 @@ fn read_body(input: &mut Input, head: &Head, limits: &Limits) -> Result<Vec<u8>,
     }
 }
 
+/// Largest single write in `write_within`.
+const WRITE_PIECE: usize = 64 << 10;
+
 /// Write all of `data` within `timeout` in total: a client that stopped
 /// reading makes this fail instead of blocking.
 fn write_within(stream: &TcpStream, mut data: &[u8], timeout: Duration) -> io::Result<()> {
@@ -905,7 +908,10 @@ fn write_within(stream: &TcpStream, mut data: &[u8], timeout: Duration) -> io::R
             return Err(io::ErrorKind::TimedOut.into());
         }
         stream.set_write_timeout(Some(left))?;
-        match w.write(data) {
+        // In bounded pieces: Windows accepts one huge write whole, without ever
+        // blocking, so the write timeout would never fire for a stalled client.
+        let piece = &data[..data.len().min(WRITE_PIECE)];
+        match w.write(piece) {
             Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
             Ok(n) => data = &data[n..],
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
