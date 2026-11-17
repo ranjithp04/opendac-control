@@ -8,7 +8,7 @@
   const source = $derived(mixer?.recordingSource ?? null);
 
   const ROWS: { scope: MixerScope; name: string; sub: string }[] = [
-    { scope: 'playback', name: 'Playback', sub: 'Speaker volume (the knob moves it too)' },
+    { scope: 'playback', name: 'Playback', sub: 'Output volume' },
     { scope: 'monitoring', name: 'Monitoring', sub: 'Inputs heard through the output' },
     { scope: 'recording', name: 'Recording', sub: 'Level of the selected source' },
   ];
@@ -67,8 +67,8 @@
     {/if}
   {/each}
   <p class="note">
-    The G6's USB audio controls, the same ones Audio MIDI Setup shows (not the G6's own protocol).
-    macOS shows one recording and one monitoring level, not one per input.
+    The G6's USB audio controls as the operating system offers them (not the G6's own protocol). The system
+    shows one recording and one monitoring level, not one per input.
   </p>
 </div>
 

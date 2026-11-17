@@ -298,7 +298,7 @@ pub struct AppState {
     pub launch_at_login: bool,
     /// Global hotkeys: settings and whether each one could be registered.
     pub hotkeys: Hotkeys,
-    /// The G6's USB audio controls (macOS only); `None` where the OS offers
+    /// The G6's USB audio controls (macOS and Windows); `None` where the OS offers
     /// none or the G6 audio device is not there.
     pub mixer: Option<Mixer>,
 }
@@ -636,7 +636,7 @@ pub enum ErrorCode {
     CurveNotFound,
     Storage,
     Autostart,
-    /// The mixer control is not offered (not macOS, G6 audio device not found,
+    /// The mixer control is not offered (no mixer on this OS, G6 audio device not found,
     /// control missing or read-only).
     MixerUnavailable,
     Internal,

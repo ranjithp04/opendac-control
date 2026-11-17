@@ -27,7 +27,7 @@ npm run tauri build                                     # release bundles (.app/
 
 ## Architecture
 
-Four layers; all HID access goes through `g6-core` (the macOS Mixer tab uses CoreAudio from `app/src-tauri/src/mixer/`, not HID):
+Four layers; all HID access goes through `g6-core` (the Mixer tab uses CoreAudio on macOS and WASAPI on Windows, from `app/src-tauri/src/mixer/`, not HID):
 
 1. **`crates/g6-core`** (library). Bottom-up:
    - `transport.rs`: hidapi behind `Transport` / `Connector` traits; `transport/fake.rs` is the fake device all tests use.
@@ -53,7 +53,7 @@ Device behaviour that shapes the code (details in `docs/protocol-g6.md`):
 ## Rules
 
 - **Never open HID interface 3** (the volume knob). Opening it stops macOS from receiving the knob until a replug. Only interface 4 is opened.
-- **Only write registers in the `features.rs` allow-list**, with range checks before anything reaches the device. New f32 settings (`5a 12`) go through the feature table. The other write commands (`0x26` SBX/Scout mask, `0x2c` output, `0x6c` DAC filter, `0x3c` mic boost, `0x3a` lighting, `0x39` hardware Direct Mode) are built only by typed builders in `protocol.rs` with fixed payloads and enum / bool / `Rgb` arguments; a new non-f32 command follows that pattern. `Device` exposes no raw-frame write. The Mixer's CoreAudio writes check their own 0..1 range and source ids.
+- **Only write registers in the `features.rs` allow-list**, with range checks before anything reaches the device. New f32 settings (`5a 12`) go through the feature table. The other write commands (`0x26` SBX/Scout mask, `0x2c` output, `0x6c` DAC filter, `0x3c` mic boost, `0x3a` lighting, `0x39` hardware Direct Mode) are built only by typed builders in `protocol.rs` with fixed payloads and enum / bool / `Rgb` arguments; a new non-f32 command follows that pattern. `Device` exposes no raw-frame write. The Mixer's CoreAudio / WASAPI writes check their own 0..1 range and source ids.
 - Protocol facts verified on hardware belong in `docs/protocol-g6.md`. The code doesn't depend on `soundblaster-x-g6-cli` (GPL); the MIT-licensed `linuxblaster_control` notes are credited in the README.
 - `PLAN.md` is untracked, so don't reference it from tracked files.
 - Windows paths for stored settings follow the `directories` crate; the README lists where each file lives.

@@ -1,8 +1,8 @@
 //! The G6's mixer: volume / mute of playback, monitoring and recording, and the
 //! recording source. These are USB Audio Class feature units, not HID, so
-//! they do not go through `g6-core`; the OS audio API owns them. Only macOS
-//! (CoreAudio) is implemented; elsewhere [`platform`] gives [`Unsupported`] and
-//! the snapshot's `mixer` stays `null`.
+//! they do not go through `g6-core`; the OS audio API owns them. macOS
+//! (CoreAudio) and Windows (WASAPI) are implemented; elsewhere [`platform`]
+//! gives [`Unsupported`] and the snapshot's `mixer` stays `null`.
 //!
 //! [`MixerBackend`] is the seam the [`Backend`](crate::backend::Backend) uses,
 //! so its tests run on a fake mixer.
@@ -14,6 +14,8 @@ use crate::api::{ApiError, ErrorCode, Mixer, MixerScope};
 
 #[cfg(target_os = "macos")]
 mod coreaudio;
+#[cfg(windows)]
+mod wasapi;
 
 /// Why a mixer call failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,8 +94,14 @@ pub fn platform() -> Arc<dyn MixerBackend> {
     Arc::new(coreaudio::CoreAudioMixer::new())
 }
 
+/// The mixer of this platform (WASAPI on Windows).
+#[cfg(windows)]
+pub fn platform() -> Arc<dyn MixerBackend> {
+    Arc::new(wasapi::WasapiMixer)
+}
+
 /// The mixer of this platform (none).
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn platform() -> Arc<dyn MixerBackend> {
     Arc::new(Unsupported)
 }

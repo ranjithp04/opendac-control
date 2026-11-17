@@ -114,7 +114,7 @@ export interface MixerSource {
 
 /**
  * The G6's USB Audio Class controls as the OS exposes them (not HID). A scope
- * the OS does not offer is null. Only macOS (CoreAudio) is implemented.
+ * the OS does not offer is null. macOS (CoreAudio) and Windows (WASAPI) are implemented; Windows has no monitoring.
  */
 export interface Mixer {
   /** Speaker volume / mute. */
@@ -167,7 +167,7 @@ export interface AppState {
   launchAtLogin: boolean;
   /** Global hotkeys (opt-in) and whether each could be registered. */
   hotkeys: Hotkeys;
-  /** null where the OS offers no mixer (not macOS) or the G6 audio device is not found: hide the Mixer tab. */
+  /** null where the OS offers no mixer (Linux) or the G6 audio device is not found: hide the Mixer tab. */
   mixer: Mixer | null;
 }
 

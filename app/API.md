@@ -81,11 +81,11 @@ Rules:
 
 ### Mixer
 
-The G6's playback / monitoring / recording levels are USB Audio Class controls, not HID, so they are read and written through the OS audio API (`mixer.rs`; macOS CoreAudio in `mixer/coreaudio.rs`), not `g6-core`. `mixer` is `null` when the OS offers no mixer (anything but macOS) or the G6 audio device is not found: the UI hides the Mixer tab then (and falls back to the EQ tab if it was open).
+The G6's playback / monitoring / recording levels are USB Audio Class controls, not HID, so they are read and written through the OS audio API (`mixer.rs`; macOS CoreAudio in `mixer/coreaudio.rs`, Windows Core Audio / WASAPI in `mixer/wasapi.rs`), not `g6-core`. `mixer` is `null` when the OS offers no mixer (Linux) or the G6 audio device is not found: the UI hides the Mixer tab then (and falls back to the EQ tab if it was open).
 
 ```ts
 interface Mixer {
-  playback:   MixerLevel | null;   // speaker volume / mute (CoreAudio output scope)
+  playback:   MixerLevel | null;   // output volume / mute (CoreAudio output scope; Windows: the render endpoint's master volume)
   monitoring: MixerLevel | null;   // inputs heard through the output (play-through scope)
   recording:  MixerLevel | null;   // level / mute of the selected source (input scope)
   recordingSource: { current: number; options: { id: number; name: string }[] } | null;
@@ -245,7 +245,7 @@ interface ApiError { code: ErrorCode; message: string }   // message is for disp
 | `curveNotFound` | No saved EQ curve (or mic EQ curve) with that name | checked by the app |
 | `storage` | A settings / preset / EQ curves / mic EQ curves / Direct Mode file could not be read or written | `store::StoreError` |
 | `autostart` | Launch at login could not be changed | autostart plugin |
-| `mixerUnavailable` | The mixer control is not offered: not macOS, G6 audio device not found, scope / mute / selector missing or read-only | `mixer::MixerError::Unavailable` |
+| `mixerUnavailable` | The mixer control is not offered: no mixer on this OS, G6 audio device not found, scope / mute / selector missing or read-only | `mixer::MixerError::Unavailable` |
 | `internal` | Bug or stopped device thread | `events::Error::Shutdown`, `direct::Error::NotActive` |
 | `notImplemented` | No longer returned (all commands are implemented); kept while `api.ts` lists it | |
 
@@ -277,4 +277,5 @@ Implemented in `backend.rs`; listed here because the UI depends on them.
 
 - **Hardware buttons during Direct Mode.** If the SBX / Scout button is pressed while Direct Mode is on, `sbx` / `scout` turn true while `directMode` is also true. The UI keeps the controls greyed out; whether the backend should switch them off again is not decided.
 - **Input Monitoring.** `docs/protocol-g6.md` §3 item 6: a packaged app may need the macOS Input Monitoring permission to open the HID interface. Not tested; check when the first signed build opens the G6.
+- **Mixer on Windows.** The whole backend (`mixer/wasapi.rs`) has only been compiled and type-checked, never run against a G6 on Windows. Unverified: that the G6's endpoints are found (by the USB id `vid_041e&pid_3256` in the endpoint's adapter id, else the friendly name), that the endpoint master volume / mute reach the G6's feature units, that an input selector exists in the capture topology (`recordingSource` is `null` without one), and that the change callbacks fire. `monitoring` is always `null` on Windows: the class driver offers no play-through control.
 - **Mixer on macOS.** Setting any mixer control (all untested on the device, see `docs/protocol-g6.md` 2.7), the CoreAudio change listeners firing on a knob turn or a replug, and whether macOS asks for microphone access when the input volume or source is set (the app never opens an audio stream) have not been verified.

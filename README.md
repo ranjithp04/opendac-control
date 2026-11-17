@@ -1,6 +1,6 @@
 # OpenDAC Control
 
-An open-source control app for the **Creative Sound BlasterX G6** USB DAC/amp, replacing Creative's Sound Blaster Command. It runs on macOS and Windows (the Mixer tab is macOS only). It talks to the G6 directly over USB HID; no Creative software or drivers are needed.
+An open-source control app for the **Creative Sound BlasterX G6** USB DAC/amp, replacing Creative's Sound Blaster Command. It runs on macOS and Windows. It talks to the G6 directly over USB HID; no Creative software or drivers are needed.
 
 It has two parts:
 
@@ -36,7 +36,7 @@ The window is a 1280 × 720 landscape layout: EQ, Effects and Mic are always on 
 - **Tray menu:** right-click the menu bar / tray icon for Show window, Direct Mode, SBX, Scout Mode and Lighting (check marks show the current state), an Output submenu (Headphones / Speakers) and a Profiles submenu (apply). Items grey out while the G6 is not connected; SBX, Scout and Profiles also while Direct Mode is on. The menu follows the device live.
 - **Global hotkeys:** optional, off by default (System tab, **Global shortcuts**): toggle Direct Mode, apply the next profile, toggle SBX. Click a field and press the keys; each needs Ctrl, Alt or Cmd / Win. Suggested keys: Ctrl+Alt+Cmd+D / P / S on macOS, Ctrl+Alt+Shift+D / P / S on Windows. A shortcut another app already holds is reported under its row, and the others still work.
 
-- **Mixer (macOS):** a Mixer tab in the fourth column with the G6's USB audio controls as CoreAudio offers them: playback volume and mute, monitoring volume and mute, recording volume and mute, and the recording source (Line In / External Mic / S/PDIF In / What U Hear). They are not HID, so the app uses CoreAudio, only on macOS; elsewhere the tab is hidden. macOS shows one monitoring and one recording level, not one per input. Changes made elsewhere (the volume knob, System Settings) show up without polling.
+- **Mixer:** a Mixer tab in the fourth column with the G6's USB audio controls from the operating system: playback volume and mute, recording volume and mute, the recording source (Line In / External Mic / S/PDIF In / What U Hear) and, on macOS only, monitoring volume and mute. They are not HID, so the app uses CoreAudio on macOS and Core Audio (WASAPI) on Windows. A control the system does not offer is hidden, and the tab is hidden if the G6's audio device is not found. The system shows one monitoring and one recording level, not one per input. Changes made elsewhere (the volume knob, System Settings, the Windows Sound panel) show up without polling. **The Windows mixer has not been tried on a real G6 yet.**
 - **Theme:** pitch black (default) or pure white, switched with the sun / moon button in the app's header; the choice is remembered.
 
 The volume knob and the hardware gain switch are left to the G6 and the operating system (on macOS the Mixer tab shows the volume the knob moves).
@@ -213,7 +213,7 @@ research_notes/     notes behind the reports
 ## Safety notes
 
 - **Interface 3 is never opened.** It is the G6's volume-knob interface; opening it stops macOS from receiving the knob until a replug. The app only opens interface 4, the control interface.
-- **Only known settings are written.** Every numeric setting the app writes over HID is listed in an allow-list with its valid range, and anything outside it is refused before it reaches the device. The few other commands (SBX/Scout, output, DAC filter, mic boost, lighting, the G6's own Direct Mode) are built from fixed frame layouts that only take on/off, a fixed choice or an RGB colour; there is no way to send an arbitrary frame. The Mixer tab's volume, mute and source go through CoreAudio, not HID.
+- **Only known settings are written.** Every numeric setting the app writes over HID is listed in an allow-list with its valid range, and anything outside it is refused before it reaches the device. The few other commands (SBX/Scout, output, DAC filter, mic boost, lighting, the G6's own Direct Mode) are built from fixed frame layouts that only take on/off, a fixed choice or an RGB colour; there is no way to send an arbitrary frame. The Mixer tab's volume, mute and source go through the operating system's audio API (CoreAudio, WASAPI), not HID.
 
 ## Status
 

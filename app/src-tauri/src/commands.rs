@@ -248,7 +248,7 @@ pub async fn set_dolby_decoder(backend: Shared<'_>, mode: DolbyMode) -> ApiResul
     blocking(&backend, move |b| b.set_dolby_decoder(mode)).await
 }
 
-// --- Mixer (USB audio controls, macOS only) ---------------------------------
+// --- Mixer (USB audio controls, macOS and Windows) ---------------------------------
 
 /// `volume` 0..=1, both channels. Rejects `mixerUnavailable` where the OS offers no such control.
 #[tauri::command]
