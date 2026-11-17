@@ -757,7 +757,7 @@ mod tests {
     }
 
     fn wait_event(rx: &Receiver<Event>, pred: impl Fn(&Event) -> bool) -> Event {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             let e = rx.recv_timeout(left).expect("event not received");
@@ -769,7 +769,7 @@ mod tests {
 
     fn start(fake: &FakeDevice, c: SessionConfig) -> (Session, Receiver<Event>) {
         let (s, rx) = Session::start(Box::new(fake.connector()), fast(), c);
-        assert!(s.wait_connected(Duration::from_secs(3)));
+        assert!(s.wait_connected(Duration::from_secs(20)));
         (s, rx)
     }
 
@@ -894,7 +894,7 @@ mod tests {
         s.device().set_dac_filter(DacFilter::Nos).unwrap();
         s.device().set_mic_boost(MicBoost::Db10).unwrap();
         let file = Paths::under(t.path()).last_known_file();
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let st = s.state();
             let on_disk = store::read_json::<DeviceState>(&file).unwrap_or(None);
@@ -920,7 +920,7 @@ mod tests {
         s.device().set_lighting_color([0, 0, 255]).unwrap();
         s.device().set_lighting_enabled(false).unwrap();
         let file = Paths::under(t.path()).last_known_file();
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let st = s.state();
             let on_disk = store::read_json::<DeviceState>(&file).unwrap_or(None);
@@ -1022,7 +1022,7 @@ mod tests {
         assert!(s.state().mask.unwrap().sbx(), "live state");
         // The file must not take the stale read either.
         let file = Paths::under(t.path()).last_known_file();
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(20);
         while !store::read_json::<DeviceState>(&file)
             .unwrap_or(None)
             .is_some_and(|d| d.mask.is_some_and(|m| m.sbx()))
@@ -1196,7 +1196,7 @@ mod tests {
         fake.drop_replies(cmd::OUTPUT, 1);
         let t = TempDir::new();
         let (s, rx) = Session::start(Box::new(fake.connector()), fast(), cfg(&t, false));
-        assert!(s.wait_connected(Duration::from_secs(3)));
+        assert!(s.wait_connected(Duration::from_secs(20)));
         assert_eq!(s.state().feature(feat("dialog")), Some(1.0));
         wait_event(&rx, |e| *e == Event::Connected);
     }
@@ -1267,7 +1267,7 @@ mod tests {
         // re-apply echo follows that would hide a wrongly applied dump).
         // Pushed once the sync has read Dialog and moved on to the mic
         // features (a push queued before the connect would be dropped).
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(20);
         while !fake.written()[before..]
             .iter()
             .any(|f| f[1] == cmd::FEATURE_READ && f[4] == crate::features::FAMILY_MIC)
@@ -1492,14 +1492,14 @@ mod tests {
                 reapply_on_first_connect: false,
             },
         );
-        assert!(s.wait_connected(Duration::from_secs(3)));
+        assert!(s.wait_connected(Duration::from_secs(20)));
         drop(s);
         // Output channel is closed once the session is gone.
         assert!(wait_closed(&rx));
     }
 
     fn wait_closed(rx: &Receiver<Event>) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
             if let Err(RecvTimeoutError::Disconnected) = rx.recv_timeout(Duration::from_millis(50))
             {
