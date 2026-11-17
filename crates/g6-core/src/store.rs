@@ -6,7 +6,7 @@
 //! `fsync`, rename) so a crash never leaves a half-written file behind.
 
 use std::fmt;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -87,6 +87,9 @@ fn io_err(path: &Path, e: io::Error) -> StoreError {
     }
 }
 
+/// Numbers the temp files of [`write_atomic`].
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Write `bytes` to `path` atomically, creating parent directories.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -96,12 +99,26 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
         .map(|n| n.to_string_lossy())
         .unwrap_or_default();
     // Unique per call: writers of one file in one process (the session thread
-    // and a refreshing caller) must not share a temp file.
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = dir.join(format!(".{name}.{}.{n}.tmp", std::process::id()));
+    // and a refreshing caller) must not share a temp file. Created with
+    // `create_new` (O_EXCL): an existing file or a symlink planted at the
+    // name (e.g. in a shared export directory) is never followed or reused.
+    let mut attempts = 0;
+    let (tmp, mut f) = loop {
+        let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = dir.join(format!(".{name}.{}.{n}.tmp", std::process::id()));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(f) => break (tmp, f),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && attempts < 100 => {
+                attempts += 1;
+            }
+            Err(e) => return Err(io_err(path, e)),
+        }
+    };
     let result = (|| {
-        let mut f = File::create(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
         fs::rename(&tmp, path)
@@ -112,7 +129,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     }
     // Make the rename durable where the platform allows it.
     #[cfg(unix)]
-    if let Ok(d) = File::open(dir) {
+    if let Ok(d) = fs::File::open(dir) {
         let _ = d.sync_all();
     }
     Ok(())
@@ -168,6 +185,8 @@ pub(crate) mod testutil {
                 std::process::id(),
                 N.fetch_add(1, Ordering::SeqCst)
             ));
+            // Left over from an earlier run with the same pid: start empty.
+            let _ = std::fs::remove_dir_all(&p);
             std::fs::create_dir_all(&p).unwrap();
             TempDir(p)
         }
@@ -227,6 +246,25 @@ mod tests {
         assert!(read_json::<u32>(&p).unwrap().is_some());
         let left: Vec<_> = fs::read_dir(t.path()).unwrap().collect();
         assert_eq!(left.len(), 1, "temp files left behind");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planted_temp_symlinks_are_not_followed() {
+        let t = TempDir::new();
+        let victim = t.path().join("victim");
+        fs::write(&victim, "keep").unwrap();
+        let dir = t.path().join("shared");
+        fs::create_dir_all(&dir).unwrap();
+        // Symlinks at the next temp names, as another local user could plant.
+        let n = TEMP_COUNTER.load(Ordering::Relaxed);
+        for k in n..n + 50 {
+            let tmp = dir.join(format!(".x.json.{}.{k}.tmp", std::process::id()));
+            std::os::unix::fs::symlink(&victim, tmp).unwrap();
+        }
+        write_json(&dir.join("x.json"), &7u32).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        assert_eq!(read_json::<u32>(&dir.join("x.json")).unwrap(), Some(7));
     }
 
     #[test]

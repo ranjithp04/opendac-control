@@ -87,7 +87,7 @@
   .tab {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 10px;
   }
   .sbx {
     display: flex;
@@ -113,8 +113,8 @@
   .fx {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    padding: 12px;
+    gap: 8px;
+    padding: 10px 12px;
     border-radius: 12px;
     border: 1px solid var(--border);
   }

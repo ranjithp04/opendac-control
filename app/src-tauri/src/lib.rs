@@ -7,7 +7,12 @@ pub mod api;
 pub mod backend;
 pub mod commands;
 pub mod eq_curves;
+pub mod hotkeys;
+pub mod mic_eq_curves;
+pub mod mixer;
 pub mod panel;
+pub mod shortcuts;
+pub mod tray_menu;
 
 use std::sync::Arc;
 
@@ -34,6 +39,7 @@ impl TauriSink {
 impl Sink for TauriSink {
     fn state_changed(&self, state: &AppState) {
         self.emit("state-changed", state);
+        panel::sync_tray(&self.0, state);
     }
     fn connection_changed(&self, payload: &ConnectionChanged) {
         self.emit("connection-changed", payload);
@@ -64,10 +70,11 @@ fn start_backend(app: &tauri::App) {
         log::warn!("cannot read the launch at login state: {e}");
         false
     });
-    let backend = Backend::new(
+    let backend = Backend::with_mixer(
         session,
         paths,
         launch_at_login,
+        mixer::platform(),
         Arc::new(TauriSink(app.handle().clone())),
     );
     let weak = Arc::downgrade(&backend);
@@ -75,6 +82,8 @@ fn start_backend(app: &tauri::App) {
         .name("g6-events".into())
         .spawn(move || backend::run_forwarder(weak, events))
         .expect("spawn the event forwarder thread");
+    // The tray menu starts as the disconnected one; show the saved profiles right away.
+    panel::sync_tray(app.handle(), &backend.snapshot());
     app.manage(backend);
 }
 
@@ -89,15 +98,22 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
+        // Global hotkeys (opt-in). Registered from Rust only (see shortcuts.rs); the plugin's own
+        // JS commands stay unreachable because no capability grants them.
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // Native Save dialog for profile export (called from Rust only, see commands::export_preset).
+        .plugin(tauri_plugin_dialog::init())
         .on_window_event(panel::on_window_event)
         .setup(|app| {
             panel::init(app)?;
             start_backend(app);
+            shortcuts::apply_at_startup(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_state,
             commands::refresh_state,
+            commands::get_device_info,
             commands::set_eq_enabled,
             commands::set_eq_band,
             commands::set_eq_bands,
@@ -106,6 +122,11 @@ pub fn run() {
             commands::list_eq_curves,
             commands::save_eq_curve,
             commands::delete_eq_curve,
+            commands::set_mic_eq_band,
+            commands::apply_mic_eq_curve,
+            commands::list_mic_eq_curves,
+            commands::save_mic_eq_curve,
+            commands::delete_mic_eq_curve,
             commands::set_sbx,
             commands::set_scout,
             commands::set_effect_enabled,
@@ -119,14 +140,25 @@ pub fn run() {
             commands::set_mic_aec,
             commands::set_mic_smart_volume,
             commands::set_dac_filter,
+            commands::set_lighting_enabled,
+            commands::set_lighting_color,
+            commands::set_output,
             commands::set_dolby_decoder,
+            commands::set_mixer_volume,
+            commands::set_mixer_mute,
+            commands::set_mixer_source,
             commands::set_direct_mode,
             commands::list_presets,
             commands::save_preset,
             commands::apply_preset,
             commands::rename_preset,
+            commands::export_preset,
+            commands::import_preset,
+            commands::import_eq,
             commands::delete_preset,
+            commands::set_auto_switch,
             commands::set_launch_at_login,
+            commands::set_hotkeys,
             commands::hide_panel,
             commands::set_app_theme,
         ])

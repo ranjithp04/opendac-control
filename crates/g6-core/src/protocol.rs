@@ -21,12 +21,15 @@ pub mod cmd {
     pub const ACK: u8 = 0x02;
     pub const IDENTITY: u8 = 0x05;
     pub const FIRMWARE: u8 = 0x07;
+    pub const SERIAL: u8 = 0x10;
     pub const FEATURE_READ: u8 = 0x11;
     pub const FEATURE_WRITE: u8 = 0x12;
     pub const HW_ID: u8 = 0x20;
     pub const MASK: u8 = 0x26;
     pub const OUTPUT: u8 = 0x2c;
     pub const DSP_VERSION: u8 = 0x30;
+    pub const HW_DIRECT: u8 = 0x39;
+    pub const LIGHTING: u8 = 0x3a;
     pub const MIC_BOOST: u8 = 0x3c;
     pub const DAC_FILTER: u8 = 0x6c;
 }
@@ -181,6 +184,24 @@ impl MicBoost {
     }
 }
 
+/// LED color as `[r, g, b]`.
+pub type Rgb = [u8; 3];
+
+/// `rrggbb` (lower case) for a color.
+pub fn rgb_to_hex(rgb: Rgb) -> String {
+    format!("{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
+}
+
+/// Parse `RRGGBB`, with or without a leading `#` (exactly six hex digits).
+pub fn rgb_from_hex(s: &str) -> Option<Rgb> {
+    let h = s.strip_prefix('#').unwrap_or(s);
+    if h.len() != 6 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let v = u32::from_str_radix(h, 16).ok()?;
+    Some([(v >> 16) as u8, (v >> 8) as u8, v as u8])
+}
+
 /// Global mask (`5a 26` reply / push).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Mask(pub u8);
@@ -220,6 +241,11 @@ pub fn identity() -> Frame {
 /// `5a 07 01 02`
 pub fn firmware() -> Frame {
     frame(cmd::FIRMWARE, &[0x02])
+}
+
+/// `5a 10 00`
+pub fn serial() -> Frame {
+    frame(cmd::SERIAL, &[])
 }
 
 /// `5a 20 00`
@@ -266,7 +292,7 @@ pub fn mask_read() -> Frame {
     frame(cmd::MASK, &[0x08, 0xff, 0xff])
 }
 
-/// `5a 26 05 07 TARGET 00 ON 00` (*documented*, not verified).
+/// `5a 26 05 07 TARGET 00 ON 00` (§2.2; verified by read-back on hardware, ACK not checked).
 pub fn mask_write(target: MaskTarget, on: bool) -> Frame {
     frame(cmd::MASK, &[0x07, target as u8, 0x00, on as u8, 0x00])
 }
@@ -286,12 +312,18 @@ pub fn output_read() -> Frame {
     frame(cmd::OUTPUT, &[0x01])
 }
 
+/// `5a 2c 05 00 MODE 00 00 00` (§2.2a). The device answers with `5a 2c 05 01
+/// MODE`, a profile dump of the new output and the ACK somewhere in between.
+pub fn output_write(output: Output) -> Frame {
+    frame(cmd::OUTPUT, &[0x00, output.to_byte(), 0x00, 0x00, 0x00])
+}
+
 /// `5a 6c 01 01`
 pub fn dac_filter_read() -> Frame {
     frame(cmd::DAC_FILTER, &[0x01])
 }
 
-/// `5a 6c 03 00 FILTER 00` (*documented*).
+/// `5a 6c 03 00 FILTER 00` (§2.2; verified by read-back on hardware, ACK not checked).
 pub fn dac_filter_write(filter: DacFilter) -> Frame {
     frame(cmd::DAC_FILTER, &[0x00, filter as u8, 0x00])
 }
@@ -301,9 +333,51 @@ pub fn mic_boost_read() -> Frame {
     frame(cmd::MIC_BOOST, &[0x01, 0x00])
 }
 
-/// `5a 3c 04 00 00 02 DB` (*documented*).
+/// `5a 3c 04 00 00 02 DB` (§2.2; verified by read-back on hardware, ACK not checked).
 pub fn mic_boost_write(boost: MicBoost) -> Frame {
     frame(cmd::MIC_BOOST, &[0x00, 0x00, 0x02, boost as u8])
+}
+
+/// `5a 3a 02 06 [01|00]` (§2.2a).
+pub fn lighting_enable_write(on: bool) -> Frame {
+    frame(cmd::LIGHTING, &[0x06, on as u8])
+}
+
+/// `5a 3a 01 07`
+pub fn lighting_enabled_read() -> Frame {
+    frame(cmd::LIGHTING, &[0x07])
+}
+
+/// `5a 3a 06 04 00 03 01 00 01`: static mode, the only one. Sent before every
+/// color; the device rejects any other mode byte (§2.2a).
+pub fn lighting_mode_static() -> Frame {
+    frame(cmd::LIGHTING, &[0x04, 0x00, 0x03, 0x01, 0x00, 0x01])
+}
+
+/// `5a 3a 09 0a 00 03 01 01 ff B G R` (§2.2a). Color bytes are `A B G R` with
+/// `A = ff`, so red is `ff 00 00 ff`.
+pub fn lighting_color_write(rgb: Rgb) -> Frame {
+    let [r, g, b] = rgb;
+    frame(
+        cmd::LIGHTING,
+        &[0x0a, 0x00, 0x03, 0x01, 0x01, 0xff, b, g, r],
+    )
+}
+
+/// `5a 3a 06 0b 01 00 01 01 01`
+pub fn lighting_color_read() -> Frame {
+    frame(cmd::LIGHTING, &[0x0b, 0x01, 0x00, 0x01, 0x01, 0x01])
+}
+
+/// `5a 39 03 00 05 [01|00]`: Creative's hardware Direct Mode (§2.2a). Only
+/// takes effect after [`hw_direct_read`] (the commit).
+pub fn hw_direct_write(on: bool) -> Frame {
+    frame(cmd::HW_DIRECT, &[0x00, 0x05, on as u8])
+}
+
+/// `5a 39 01 01`: the commit after [`hw_direct_write`], and the status read.
+pub fn hw_direct_read() -> Frame {
+    frame(cmd::HW_DIRECT, &[0x01])
 }
 
 // ---------------------------------------------------------------------------
@@ -365,10 +439,18 @@ pub enum Message {
     DacFilter(DacFilter),
     /// `5a 3c 04 01 00 02 DB`
     MicBoost(MicBoost),
+    /// `5a 3a 02 07 [01|00]`
+    LightingEnabled(bool),
+    /// `5a 3a 09 0b 01 00 01 01 A B G R`
+    LightingColor(Rgb),
+    /// `5a 39 05 01 FLAG 00 00 04` (`20` on, `00` off)
+    HwDirect(bool),
     /// `5a 05 04 b0 b1 b2 b3`
     Identity(Vec<u8>),
     /// `5a 07 LEN ascii` (trailing NULs stripped)
     Firmware(String),
+    /// `5a 10 08` + 8 bytes (the serial number; never log it)
+    Serial([u8; 8]),
     /// `5a 20 04 …`
     HwId(Vec<u8>),
     /// `5a 30 04 …`
@@ -390,8 +472,11 @@ impl Message {
             Message::Output(_) => cmd::OUTPUT,
             Message::DacFilter(_) => cmd::DAC_FILTER,
             Message::MicBoost(_) => cmd::MIC_BOOST,
+            Message::LightingEnabled(_) | Message::LightingColor(_) => cmd::LIGHTING,
+            Message::HwDirect(_) => cmd::HW_DIRECT,
             Message::Identity(_) => cmd::IDENTITY,
             Message::Firmware(_) => cmd::FIRMWARE,
+            Message::Serial(_) => cmd::SERIAL,
             Message::HwId(_) => cmd::HW_ID,
             Message::DspVersion(_) => cmd::DSP_VERSION,
             Message::Unknown(b) => {
@@ -435,11 +520,23 @@ fn decode_payload(command: u8, p: &[u8]) -> Option<Message> {
         cmd::MIC_BOOST if p.len() >= 4 && p[..3] == [0x01, 0x00, 0x02] => {
             MicBoost::from_byte(p[3]).map(Message::MicBoost)
         }
+        cmd::LIGHTING if p.len() >= 2 && p[0] == 0x07 && p[1] <= 1 => {
+            Some(Message::LightingEnabled(p[1] == 1))
+        }
+        cmd::LIGHTING if p.len() >= 9 && p[..5] == [0x0b, 0x01, 0x00, 0x01, 0x01] => {
+            Some(Message::LightingColor([p[8], p[7], p[6]]))
+        }
+        cmd::HW_DIRECT if p.len() >= 2 && p[0] == 0x01 => match p[1] {
+            0x20 => Some(Message::HwDirect(true)),
+            0x00 => Some(Message::HwDirect(false)),
+            _ => None,
+        },
         cmd::IDENTITY => Some(Message::Identity(p.to_vec())),
         cmd::FIRMWARE => {
             let s = String::from_utf8_lossy(p);
             Some(Message::Firmware(s.trim_matches('\0').to_string()))
         }
+        cmd::SERIAL if p.len() == 8 => Some(Message::Serial(p.try_into().ok()?)),
         cmd::HW_ID => Some(Message::HwId(p.to_vec())),
         cmd::DSP_VERSION => Some(Message::DspVersion(p.to_vec())),
         _ => None,
@@ -523,9 +620,10 @@ mod tests {
     }
 
     #[test]
-    fn builders_match_plan_7_2() {
+    fn builders_match_protocol_doc_2_2() {
         head(&identity(), "5a 05 00");
         head(&firmware(), "5a 07 01 02");
+        head(&serial(), "5a 10 00");
         head(&hw_id(), "5a 20 00");
         head(&dsp_version(), "5a 30 00");
         head(&feature_read(0x96, 0x09).unwrap(), "5a 11 03 01 96 09");
@@ -715,6 +813,19 @@ mod tests {
     }
 
     #[test]
+    fn decode_serial_reply() {
+        // Reply from the test unit (docs/protocol-g6.md section 2.2a).
+        let m = decode(&report("5a 10 08 ef 67 74 00 00 00 00 00"));
+        assert_eq!(m, Message::Serial([0xef, 0x67, 0x74, 0, 0, 0, 0, 0]));
+        assert_eq!(m.cmd(), Some(cmd::SERIAL));
+        // Any other length is not a serial reply.
+        assert!(matches!(
+            decode(&report("5a 10 04 ef 67 74 00")),
+            Message::Unknown(_)
+        ));
+    }
+
+    #[test]
     fn decode_dac_filter_and_mic_boost() {
         assert_eq!(
             decode(&report("5a 6c 03 01 01 00")),
@@ -751,6 +862,106 @@ mod tests {
             decode(&report("5a 11 08 02 00 96 09 00 00 80 3f")),
             Message::Unknown(_)
         ));
+    }
+
+    // Captures from `docs/protocol-g6.md` §2.2a.
+    #[test]
+    fn lighting_output_and_hw_direct_builders() {
+        head(&output_write(Output::Speakers), "5a 2c 05 00 02 00 00 00");
+        head(&output_write(Output::Headphones), "5a 2c 05 00 04 00 00 00");
+        head(&lighting_enable_write(true), "5a 3a 02 06 01");
+        head(&lighting_enable_write(false), "5a 3a 02 06 00");
+        head(&lighting_enabled_read(), "5a 3a 01 07");
+        head(&lighting_mode_static(), "5a 3a 06 04 00 03 01 00 01");
+        head(&lighting_color_read(), "5a 3a 06 0b 01 00 01 01 01");
+        head(&hw_direct_write(true), "5a 39 03 00 05 01");
+        head(&hw_direct_write(false), "5a 39 03 00 05 00");
+        head(&hw_direct_read(), "5a 39 01 01");
+    }
+
+    #[test]
+    fn lighting_color_byte_order_is_a_b_g_r() {
+        head(
+            &lighting_color_write([255, 0, 0]),
+            "5a 3a 09 0a 00 03 01 01 ff 00 00 ff",
+        );
+        head(
+            &lighting_color_write([0, 255, 0]),
+            "5a 3a 09 0a 00 03 01 01 ff 00 ff 00",
+        );
+        head(
+            &lighting_color_write([0, 0, 255]),
+            "5a 3a 09 0a 00 03 01 01 ff ff 00 00",
+        );
+        head(
+            &lighting_color_write([0x12, 0x34, 0x56]),
+            "5a 3a 09 0a 00 03 01 01 ff 56 34 12",
+        );
+    }
+
+    #[test]
+    fn decode_lighting_and_hw_direct() {
+        assert_eq!(
+            decode(&report("5a 3a 02 07 01")),
+            Message::LightingEnabled(true)
+        );
+        assert_eq!(
+            decode(&report("5a 3a 02 07 00")),
+            Message::LightingEnabled(false)
+        );
+        assert_eq!(
+            decode(&report("5a 3a 09 0b 01 00 01 01 ff 00 00 ff")),
+            Message::LightingColor([255, 0, 0])
+        );
+        assert_eq!(
+            decode(&report("5a 3a 09 0b 01 00 01 01 ff 00 ff 00")),
+            Message::LightingColor([0, 255, 0])
+        );
+        assert_eq!(
+            decode(&report("5a 3a 09 0b 01 00 01 01 ff ff 00 00")),
+            Message::LightingColor([0, 0, 255])
+        );
+        // Rejected / unknown sub-commands are not lighting values.
+        assert!(matches!(
+            decode(&report("5a 3a 02 07 02")),
+            Message::Unknown(_)
+        ));
+        assert!(matches!(
+            decode(&report("5a 3a 05 01 00 04 00 00")),
+            Message::Unknown(_)
+        ));
+        assert_eq!(
+            decode(&report("5a 39 05 01 20 00 00 04")),
+            Message::HwDirect(true)
+        );
+        assert_eq!(
+            decode(&report("5a 39 05 01 00 00 00 04")),
+            Message::HwDirect(false)
+        );
+        assert!(matches!(
+            decode(&report("5a 39 05 01 10 00 00 04")),
+            Message::Unknown(_)
+        ));
+        // The enumerate reply is not a status.
+        assert!(matches!(
+            decode(&report("5a 39 09 02 20 64 02 04 00 00 00 00")),
+            Message::Unknown(_)
+        ));
+        assert_eq!(Message::LightingColor([0; 3]).cmd(), Some(cmd::LIGHTING));
+        assert_eq!(Message::HwDirect(true).cmd(), Some(cmd::HW_DIRECT));
+    }
+
+    #[test]
+    fn rgb_hex() {
+        assert_eq!(rgb_from_hex("ff8000"), Some([255, 128, 0]));
+        assert_eq!(rgb_from_hex("#FF8000"), Some([255, 128, 0]));
+        assert_eq!(rgb_to_hex([255, 128, 0]), "ff8000");
+        assert_eq!(rgb_to_hex([0, 0, 1]), "000001");
+        for bad in [
+            "", "#", "ff80", "ff80000", "gg0000", "##ff8000", "+f8000", " ff8000",
+        ] {
+            assert_eq!(rgb_from_hex(bad), None, "{bad:?}");
+        }
     }
 
     #[test]

@@ -13,10 +13,12 @@ use std::time::{Duration, Instant};
 
 use super::{Connector, Transport, TransportError};
 use crate::features::FEATURES;
-use crate::protocol::{self, cmd, DacFilter, Frame, MicBoost, Output, REPORT_LEN};
+use crate::protocol::{self, cmd, DacFilter, Frame, MicBoost, Output, Rgb, REPORT_LEN};
 
 /// Firmware string the fake reports (from the test unit, `docs/protocol-g6.md`).
 pub const FAKE_FIRMWARE: &str = "2.1.250903.1324";
+/// Serial the fake reports (the test unit's bytes, `docs/protocol-g6.md`).
+pub const FAKE_SERIAL: [u8; 8] = [0xef, 0x67, 0x74, 0, 0, 0, 0, 0];
 
 /// Feature values (by family / id) and the SBX bit saved when Scout went on.
 type BeforeScout = (Vec<((u8, u8), f32)>, bool);
@@ -27,6 +29,11 @@ struct Sim {
     output: Output,
     filter: DacFilter,
     boost: MicBoost,
+    light_on: bool,
+    light_rgb: Rgb,
+    /// Hardware Direct Mode, and the value written but not yet committed.
+    hw_direct: bool,
+    hw_direct_staged: Option<bool>,
     /// Device → host frames waiting to be read.
     inbox: VecDeque<Frame>,
     /// Frames injected ahead of the reply to the next host write.
@@ -40,11 +47,15 @@ struct Sim {
     drop_first_ack: bool,
     writes_since_open: u32,
     reject_next: Option<u8>,
+    /// Writes still let through, then the status the one after is rejected with.
+    reject_after: Option<(u32, u8)>,
     ignore_writes: bool,
     silent: bool,
     /// Don't answer the next N host frames with this command.
     drop_replies: Option<(u8, u32)>,
-    /// EQ / Smart Volume / SBX as they were before Scout was turned on by a
+    /// How long each host frame takes to be accepted (a slow link).
+    write_delay: Duration,
+    /// EQ / Smart Volume / pre-amp / SBX as they were before Scout was turned on by a
     /// write; restored when a write turns Scout off (`docs/protocol-g6.md` §1).
     before_scout: Option<BeforeScout>,
 }
@@ -101,6 +112,10 @@ impl FakeDevice {
             output: Output::Headphones,
             filter: DacFilter::FastMin,
             boost: MicBoost::Db30,
+            light_on: true,
+            light_rgb: [255, 0, 0],
+            hw_direct: false,
+            hw_direct_staged: None,
             inbox: VecDeque::new(),
             before_next_reply: VecDeque::new(),
             written: Vec::new(),
@@ -111,9 +126,11 @@ impl FakeDevice {
             drop_first_ack: false,
             writes_since_open: 0,
             reject_next: None,
+            reject_after: None,
             ignore_writes: false,
             silent: false,
             drop_replies: None,
+            write_delay: Duration::ZERO,
             before_scout: None,
         };
         FakeDevice {
@@ -164,6 +181,23 @@ impl FakeDevice {
     pub fn mic_boost(&self) -> MicBoost {
         self.with(|s| s.boost)
     }
+    pub fn lighting_enabled(&self) -> bool {
+        self.with(|s| s.light_on)
+    }
+    pub fn lighting_color(&self) -> Rgb {
+        self.with(|s| s.light_rgb)
+    }
+    /// Set the LED state silently (no push).
+    pub fn set_lighting(&self, on: bool, rgb: Rgb) {
+        self.with(|s| {
+            s.light_on = on;
+            s.light_rgb = rgb;
+        })
+    }
+    /// Hardware Direct Mode as last committed.
+    pub fn hw_direct(&self) -> bool {
+        self.with(|s| s.hw_direct)
+    }
     /// Every frame written by the host so far.
     pub fn written(&self) -> Vec<Frame> {
         self.with(|s| s.written.clone())
@@ -186,6 +220,11 @@ impl FakeDevice {
     pub fn reject_next_write(&self, status: u8) {
         self.with(|s| s.reject_next = Some(status))
     }
+    /// Let the next `n` writes through, then ACK the one after with this
+    /// status and don't apply it.
+    pub fn reject_write_after(&self, n: u32, status: u8) {
+        self.with(|s| s.reject_after = Some((n, status)))
+    }
     /// ACK writes with `00` but don't change any value.
     pub fn set_ignore_writes(&self, on: bool) {
         self.with(|s| s.ignore_writes = on)
@@ -198,6 +237,12 @@ impl FakeDevice {
     /// (requests time out; other commands are answered).
     pub fn drop_replies(&self, command: u8, n: u32) {
         self.with(|s| s.drop_replies = Some((command, n)))
+    }
+
+    /// Every host frame takes `delay` to be accepted, as on a busy USB link
+    /// (a refresh of ~70 reads then takes ~70 times that).
+    pub fn set_write_delay(&self, delay: Duration) {
+        self.with(|s| s.write_delay = delay)
     }
 
     // --- pushes -----------------------------------------------------------
@@ -223,20 +268,14 @@ impl FakeDevice {
         self.with(|s| {
             s.output = out;
             s.inbox.push_back(output_frame(out));
-            let entries: Vec<_> = FEATURES
-                .iter()
-                .filter(|f| crate::features::per_output(f))
-                .map(|f| (f.family, f.id, s.features[&(f.family, f.id)]))
-                .collect();
-            for chunk in entries.chunks(8) {
-                s.inbox.push_back(feature_frame(chunk));
-            }
+            let dump = s.profile_dump();
+            s.inbox.extend(dump);
         })
     }
     /// Scout button, as seen on hardware: Scout on applies Scout's settings
-    /// (`docs/protocol-g6.md` §1) but the push only carries the mask and "EQ off", not the
-    /// Scout curve or Smart Volume; Scout off restores the previous state and
-    /// pushes the mask and a dump of the playback features.
+    /// (`docs/protocol-g6.md` §1) but the push only carries the mask, Surround
+    /// and "EQ off", not the Scout curve or Smart Volume; Scout off restores
+    /// the previous state and pushes the mask and a dump of the playback features.
     pub fn press_scout(&self, on: bool) {
         self.with(|s| {
             let p = crate::features::FAMILY_PLAYBACK;
@@ -244,8 +283,12 @@ impl FakeDevice {
                 s.scout_on();
                 s.mask = (s.mask | protocol::Mask::SCOUT) & !protocol::Mask::SBX;
                 s.inbox.push_back(mask_frame(s.mask));
-                let eq = crate::features::by_name("eq").expect("in table").id;
-                s.inbox.push_back(feature_frame(&[(p, eq, 0.0)]));
+                let id = |name: &str| crate::features::by_name(name).expect("in table").id;
+                let surround = s.features[&(p, id("surround"))];
+                s.inbox.push_back(feature_frame(&[
+                    (p, id("surround"), surround),
+                    (p, id("eq"), 0.0),
+                ]));
             } else {
                 s.scout_off();
                 s.mask &= !protocol::Mask::SCOUT;
@@ -289,12 +332,12 @@ impl FakeDevice {
 pub const SCOUT_CURVE: [f32; 10] = [2.0, 3.0, 3.0, -2.0, -2.0, 0.0, 3.0, 4.0, 3.0, 2.0];
 
 impl Sim {
-    /// Scout turned on by a write: remember EQ / Smart Volume / SBX, then
-    /// apply Scout's own settings.
+    /// Scout turned on by a write: remember EQ / Smart Volume / pre-amp / SBX,
+    /// then apply Scout's own settings (pre-amp 0 dB).
     fn scout_on(&mut self) {
         let owned: Vec<_> = FEATURES
             .iter()
-            .filter(|f| crate::features::scout_owned(f))
+            .filter(|f| crate::features::scout_resets(f))
             .map(|f| ((f.family, f.id), self.features[&(f.family, f.id)]))
             .collect();
         self.before_scout = Some((owned, self.mask & protocol::Mask::SBX != 0));
@@ -303,6 +346,7 @@ impl Sim {
         self.features.insert((p, id("eq")), 1.0);
         self.features.insert((p, id("smartvol")), 1.0);
         self.features.insert((p, id("smartvol_level")), 0.9);
+        self.features.insert((p, id("eq_preamp")), 0.0);
         for (i, v) in SCOUT_CURVE.iter().enumerate() {
             self.features
                 .insert((p, crate::features::EQ_FIRST_ID + i as u8), *v);
@@ -310,7 +354,7 @@ impl Sim {
     }
 
     /// Scout turned off by a write: the device restores its previous EQ /
-    /// SBX state (only known if Scout was turned on by a write).
+    /// pre-amp / SBX state (only known if Scout was turned on by a write).
     fn scout_off(&mut self) {
         if let Some((owned, sbx)) = self.before_scout.take() {
             self.features.extend(owned);
@@ -318,6 +362,16 @@ impl Sim {
                 self.mask |= protocol::Mask::SBX;
             }
         }
+    }
+
+    /// Dump of the per-output features, as the device pushes after a switch.
+    fn profile_dump(&self) -> Vec<Frame> {
+        let entries: Vec<_> = FEATURES
+            .iter()
+            .filter(|f| crate::features::per_output(f))
+            .map(|f| (f.family, f.id, self.features[&(f.family, f.id)]))
+            .collect();
+        entries.chunks(8).map(feature_frame).collect()
     }
 
     /// ACK frame for a write, unless this is the first write after open and
@@ -332,6 +386,13 @@ impl Sim {
     /// Count the write; returns the ACK status and whether to apply it.
     fn write_status(&mut self) -> (u8, bool) {
         self.writes_since_open += 1;
+        if let Some((n, st)) = self.reject_after {
+            if n == 0 {
+                self.reject_after = None;
+                return (st, false);
+            }
+            self.reject_after = Some((n - 1, st));
+        }
         match self.reject_next.take() {
             Some(st) => (st, false),
             None => (0x00, !self.ignore_writes),
@@ -361,6 +422,7 @@ impl Sim {
                 s.push(0);
                 out.push(enc(cmd::FIRMWARE, &s));
             }
+            (cmd::SERIAL, []) => out.push(enc(cmd::SERIAL, &FAKE_SERIAL)),
             (cmd::HW_ID, []) => out.push(enc(cmd::HW_ID, &[0x97, 0, 0, 0])),
             (cmd::DSP_VERSION, []) => out.push(enc(cmd::DSP_VERSION, &[0x30, 0x01, 0x10, 0x00])),
             (cmd::FEATURE_READ, &[0x01, fam, id]) => {
@@ -406,6 +468,27 @@ impl Sim {
                 }
             }
             (cmd::OUTPUT, [0x01]) => out.push(output_frame(self.output)),
+            (cmd::OUTPUT, &[0x00, mode, 0x00, 0x00, 0x00]) => {
+                let (st, apply) = self.write_status();
+                if let (true, Some(o)) = (apply, Output::from_byte(mode)) {
+                    self.output = o;
+                }
+                let ack = self.ack(cmd::OUTPUT, st);
+                if st == 0 {
+                    // As captured: the mode reply, the new profile, the mask
+                    // and an unknown push, with the ACK in the middle of the
+                    // dumps.
+                    let mut frames = vec![output_frame(self.output)];
+                    frames.extend(self.profile_dump());
+                    frames.push(mask_frame(self.mask));
+                    frames.push(enc(0x6e, &[0x01, 0x00]));
+                    let mid = frames.len() / 2;
+                    frames.splice(mid..mid, ack);
+                    out.extend(frames);
+                } else {
+                    out.extend(ack);
+                }
+            }
             (cmd::DAC_FILTER, [0x01]) => {
                 out.push(enc(cmd::DAC_FILTER, &[0x01, self.filter as u8, 0]))
             }
@@ -425,6 +508,54 @@ impl Sim {
                     self.boost = x;
                 }
                 out.extend(self.ack(cmd::MIC_BOOST, st));
+            }
+            (cmd::LIGHTING, &[0x06, on]) if on <= 1 => {
+                let (st, apply) = self.write_status();
+                if apply {
+                    self.light_on = on == 1;
+                }
+                out.extend(self.ack(cmd::LIGHTING, st));
+            }
+            (cmd::LIGHTING, [0x07]) => {
+                out.push(enc(cmd::LIGHTING, &[0x07, u8::from(self.light_on)]))
+            }
+            // Static mode; any other mode byte falls through to the 0x83 reject.
+            (cmd::LIGHTING, [0x04, 0x00, 0x03, 0x01, 0x00, 0x01]) => {
+                let (st, _) = self.write_status();
+                out.extend(self.ack(cmd::LIGHTING, st));
+            }
+            (cmd::LIGHTING, &[0x0a, 0x00, 0x03, 0x01, 0x01, _a, b, g, r]) => {
+                let (st, apply) = self.write_status();
+                if apply {
+                    self.light_rgb = [r, g, b];
+                }
+                out.extend(self.ack(cmd::LIGHTING, st));
+            }
+            (cmd::LIGHTING, [0x0b, 0x01, 0x00, 0x01, 0x01, 0x01]) => {
+                let [r, g, b] = self.light_rgb;
+                out.push(enc(
+                    cmd::LIGHTING,
+                    &[0x0b, 0x01, 0x00, 0x01, 0x01, 0xff, b, g, r],
+                ))
+            }
+            (cmd::HW_DIRECT, &[0x00, 0x05, on]) if on <= 1 => {
+                let (st, apply) = self.write_status();
+                if apply {
+                    self.hw_direct_staged = Some(on == 1);
+                }
+                out.extend(self.ack(cmd::HW_DIRECT, st));
+            }
+            // The commit, which doubles as the status read.
+            (cmd::HW_DIRECT, [0x01]) => {
+                let turned_off = match self.hw_direct_staged.take() {
+                    Some(on) => std::mem::replace(&mut self.hw_direct, on) && !on,
+                    None => false,
+                };
+                let flag = if self.hw_direct { 0x20 } else { 0x00 };
+                out.push(enc(cmd::HW_DIRECT, &[0x01, flag, 0x00, 0x00, 0x04]));
+                if turned_off {
+                    out.extend(self.profile_dump());
+                }
             }
             _ => out.push(enc(cmd::ACK, &[f[1], 0x83])),
         }
@@ -472,6 +603,10 @@ fn gone() -> TransportError {
 impl Transport for FakeTransport {
     fn write_frame(&mut self, frame: &Frame) -> Result<(), TransportError> {
         let generation = self.generation;
+        let delay = self.dev.with(|s| s.write_delay);
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
         self.dev.with(|s| {
             if !s.plugged || s.generation != generation {
                 return Err(gone());

@@ -9,6 +9,7 @@
     label,
     oncommit,
     disabled = false,
+    height = 150,
     live = $bindable(null),
   }: {
     value: number;
@@ -19,6 +20,8 @@
     /** Called at most every 50 ms while dragging, and once on release. */
     oncommit: (v: number) => Promise<unknown>;
     disabled?: boolean;
+    /** Track height in px. */
+    height?: number;
     /** The value being dragged (or still being written), `null` otherwise; for labels and curves. */
     live?: number | null;
   } = $props();
@@ -105,6 +108,7 @@
   bind:this={el}
   class="vs"
   class:disabled
+  style:height="{height}px"
   role="slider"
   tabindex={disabled ? -1 : 0}
   aria-label={label}
@@ -127,7 +131,6 @@
   .vs {
     position: relative;
     width: 20px;
-    height: 150px;
     cursor: pointer;
     touch-action: none;
   }

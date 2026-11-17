@@ -12,7 +12,8 @@ import {
   type Commands,
 } from './api';
 
-export type Tab = 'eq' | 'fx' | 'mic' | 'dev';
+/** Sections of the right-hand panel (EQ, Effects and Mic are always on screen). */
+export type Tab = 'mix' | 'out' | 'prof' | 'sys';
 
 const TOAST_MS = 5000;
 
@@ -20,7 +21,7 @@ class AppStore {
   state = $state<AppState>(emptyState());
   /** False until the first snapshot arrived. */
   loaded = $state(false);
-  tab = $state<Tab>('eq');
+  tab = $state<Tab>('mix');
   toast = $state<{ id: number; message: string } | null>(null);
 
   private toastId = 0;
@@ -66,8 +67,13 @@ class AppStore {
   }
 
   notify(e: ApiError): void {
+    this.say(e.message || e.code);
+  }
+
+  /** Show a transient notice (also used for plain confirmations). */
+  say(message: string): void {
     const id = ++this.toastId;
-    this.toast = { id, message: e.message || e.code };
+    this.toast = { id, message };
     if (this.toastTimer) clearTimeout(this.toastTimer);
     this.toastTimer = setTimeout(() => {
       if (this.toast?.id === id) this.toast = null;

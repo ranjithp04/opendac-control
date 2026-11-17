@@ -25,7 +25,7 @@ fn ideal_values(f: &Feature) -> Vec<f32> {
 }
 
 /// Device-style noise: a few ulps either way and a ~1.8e-7 absolute offset
-/// (`0x34400000`, the plan's example).
+/// (`0x34400000`, the example in `docs/protocol-g6.md` §2.3).
 fn noisy(v: f32) -> Vec<f32> {
     let bits = v.to_bits();
     let mut out = vec![
@@ -136,7 +136,7 @@ fn db_and_distance_rounding_is_to_half_steps() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn range_limits_match_plan_7_3() {
+fn range_limits_match_protocol_doc_2_3() {
     let expect: &[(&str, f32, f32)] = &[
         ("surround", 0.0, 1.0),
         ("surround_level", 0.0, 1.0),

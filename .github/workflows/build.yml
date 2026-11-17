@@ -13,7 +13,43 @@ permissions:
   contents: write # attach the files to the GitHub release on tag builds
 
 jobs:
+  # Checks first, so a tag never ships bundles from a tree whose tests fail.
+  # `cargo test --workspace` also compiles g6-cli, which the app build skips.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: app/ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: Rust checks
+        run: |
+          cargo fmt --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+
+      - name: UI type check
+        working-directory: app/ui
+        run: |
+          npm ci
+          npm run check
+
   build:
+    needs: test
     strategy:
       fail-fast: false
       matrix:

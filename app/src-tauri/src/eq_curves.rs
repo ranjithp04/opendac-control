@@ -95,6 +95,12 @@ impl From<CurveError> for ApiError {
 
 /// Trim `name` and check it can be used for a saved curve.
 pub fn validate_name(name: &str) -> Result<String, CurveError> {
+    validate_name_with(name, &RESERVED_NAMES)
+}
+
+/// [`validate_name`] with another list of reserved names (the mic EQ curves
+/// share the rules but not the built-in names).
+pub fn validate_name_with(name: &str, reserved: &[&str]) -> Result<String, CurveError> {
     let name = name.trim();
     if name.is_empty() {
         return Err(CurveError::BadName("give the curve a name".into()));
@@ -109,7 +115,7 @@ pub fn validate_name(name: &str) -> Result<String, CurveError> {
             "curve names cannot contain control characters".into(),
         ));
     }
-    if RESERVED_NAMES.iter().any(|r| r.eq_ignore_ascii_case(name)) {
+    if reserved.iter().any(|r| r.eq_ignore_ascii_case(name)) {
         return Err(CurveError::BadName(format!(
             "\"{name}\" is a built-in curve name"
         )));
@@ -117,7 +123,7 @@ pub fn validate_name(name: &str) -> Result<String, CurveError> {
     Ok(name.to_string())
 }
 
-fn same_name(a: &str, b: &str) -> bool {
+pub(crate) fn same_name(a: &str, b: &str) -> bool {
     a.to_lowercase() == b.to_lowercase()
 }
 

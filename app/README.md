@@ -16,4 +16,4 @@ Running the app opens the G6 (`npm run tauri -- dev`); do that deliberately.
 
 `npm run dev` in a browser (http://localhost:1420) runs the UI against an in-memory mock backend (`ui/src/lib/mock.ts`), no Tauri and no device. Console handle: `__g6mock.switchOutput()`, `.disconnect()`, `.connect()`, `.pressScout()`, `.pressSbx()`, `.failNext('deviceTimeout')`; `?mock=disconnected` starts disconnected.
 
-Design: `docs/design/*.dc.html`. Inter and JetBrains Mono are bundled from the `@fontsource` packages (latin subset), so the app needs no network and the CSP stays closed.
+Inter and JetBrains Mono are bundled from the `@fontsource` packages (latin subset), so the app needs no network and the CSP stays closed.

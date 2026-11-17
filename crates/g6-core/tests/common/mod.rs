@@ -23,6 +23,8 @@ impl TempDir {
             std::process::id(),
             N.fetch_add(1, Ordering::SeqCst)
         ));
+        // Left over from an earlier run with the same pid: start empty.
+        let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         TempDir(p)
     }

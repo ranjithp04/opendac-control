@@ -5,6 +5,7 @@ mod cli;
 mod format;
 mod logger;
 mod run;
+mod serve;
 
 use std::process::ExitCode;
 use std::time::Duration;

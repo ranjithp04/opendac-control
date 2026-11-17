@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Event listening for the panel window. App commands need no permission entry.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
 }

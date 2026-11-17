@@ -17,7 +17,9 @@
 //! come back with Surround off, `docs/protocol-g6.md` §3 item 2) the session reads the device,
 //! compares it with the last known state and writes back only the
 //! differences: SBX / Scout, the active output's playback features, the
-//! mic / decoder features, DAC filter and mic boost. Then it reads the
+//! mic / decoder features, DAC filter, mic boost and the LED. The output is
+//! not among them: the headphone jack decides it, and a manual
+//! [`Device::set_output`] is not remembered. Then it reads the
 //! device again and drops the events that were queued meanwhile (the device's
 //! own startup dump and the echoes of our writes), so stale values can never
 //! overwrite the remembered settings.
@@ -38,7 +40,7 @@ use std::time::{Duration, Instant};
 
 use crate::events::{Change, Config, Device, Error, Event};
 use crate::features::{self, FEATURES};
-use crate::protocol::MaskTarget;
+use crate::protocol::{rgb_to_hex, MaskTarget};
 use crate::state::DeviceState;
 use crate::store::{self, Paths};
 use crate::transport::Connector;
@@ -119,6 +121,16 @@ fn merge_changes(into: &mut DeviceState, before: &DeviceState, after: &DeviceSta
     changed |= take(&mut into.mask, before.mask, after.mask);
     changed |= take(&mut into.dac_filter, before.dac_filter, after.dac_filter);
     changed |= take(&mut into.mic_boost, before.mic_boost, after.mic_boost);
+    changed |= take(
+        &mut into.lighting_enabled,
+        before.lighting_enabled,
+        after.lighting_enabled,
+    );
+    changed |= take(
+        &mut into.lighting_color,
+        before.lighting_color,
+        after.lighting_color,
+    );
     for (dst, b, a) in [
         (&mut into.headphones, &before.headphones, &after.headphones),
         (&mut into.speakers, &before.speakers, &after.speakers),
@@ -148,6 +160,16 @@ fn rebase_read(into: &mut DeviceState, before: &DeviceState, after: &DeviceState
     take(&mut into.mask, before.mask, after.mask);
     take(&mut into.dac_filter, before.dac_filter, after.dac_filter);
     take(&mut into.mic_boost, before.mic_boost, after.mic_boost);
+    take(
+        &mut into.lighting_enabled,
+        before.lighting_enabled,
+        after.lighting_enabled,
+    );
+    take(
+        &mut into.lighting_color,
+        before.lighting_color,
+        after.lighting_color,
+    );
     for (dst, b, a) in [
         (&mut into.headphones, &before.headphones, &after.headphones),
         (&mut into.speakers, &before.speakers, &after.speakers),
@@ -168,6 +190,8 @@ fn fill_missing(into: &mut DeviceState, from: &DeviceState) {
     into.mask = into.mask.or(from.mask);
     into.dac_filter = into.dac_filter.or(from.dac_filter);
     into.mic_boost = into.mic_boost.or(from.mic_boost);
+    into.lighting_enabled = into.lighting_enabled.or(from.lighting_enabled);
+    into.lighting_color = into.lighting_color.or(from.lighting_color);
     for (dst, src) in [
         (&mut into.headphones, &from.headphones),
         (&mut into.speakers, &from.speakers),
@@ -184,11 +208,11 @@ fn fill_missing(into: &mut DeviceState, from: &DeviceState) {
 /// `have` must be a fresh read of the device (`DeviceState::refresh`); it is
 /// refreshed again if Scout had to be switched off (the device then restores
 /// its own EQ / SBX state). Features are compared against the device, never
-/// written blindly. When `want` has Scout on, the features Scout sets itself
-/// ([`features::scout_owned`]: EQ, Smart Volume) are not written: the
-/// remembered values are Scout's, and writing them before turning Scout on
-/// would make the device keep the Scout curve as the user's EQ. Errors only
-/// when the device is lost.
+/// written blindly. When `want` has Scout on, SBX and the features Scout replaces
+/// ([`features::scout_resets`]: EQ, Smart Volume, pre-amp) are not written:
+/// the remembered values are Scout's, and writing them before turning Scout on
+/// would make the device keep the Scout curve (or a 0 dB pre-amp) as the
+/// user's. Errors only when the device is lost.
 pub fn reapply(
     dev: &Device,
     want: &DeviceState,
@@ -211,8 +235,12 @@ pub fn reapply(
             )?;
         }
     }
+    // SBX is left alone when Scout goes on afterwards: Scout switches it off
+    // and the device restores the SBX state from before when Scout goes off
+    // (the remembered mask always says SBX off under Scout).
+    let scout_target = want.mask.is_some_and(|m| m.scout());
     if let (Some(w), Some(h)) = (want.mask, have.mask) {
-        if w.sbx() != h.sbx() {
+        if w.sbx() != h.sbx() && !scout_target {
             step(
                 &mut out,
                 format!("sbx {}", w.sbx()),
@@ -221,10 +249,9 @@ pub fn reapply(
         }
     }
 
-    let scout_target = want.mask.is_some_and(|m| m.scout());
     for f in FEATURES
         .iter()
-        .filter(|f| f.exposed && !(scout_target && features::scout_owned(f)))
+        .filter(|f| f.exposed && !(scout_target && features::scout_resets(f)))
     {
         // Per-output values belong to one output: the one that is active now.
         let w = if features::per_output(f) {
@@ -268,6 +295,24 @@ pub fn reapply(
             )?;
         }
     }
+    if let Some(w) = want.lighting_color {
+        if have.lighting_color != Some(w) {
+            step(
+                &mut out,
+                format!("lighting color {}", rgb_to_hex(w)),
+                wrote(dev.set_lighting_color(w)),
+            )?;
+        }
+    }
+    if let Some(w) = want.lighting_enabled {
+        if have.lighting_enabled != Some(w) {
+            step(
+                &mut out,
+                format!("lighting {}", if w { "on" } else { "off" }),
+                wrote(dev.set_lighting_enabled(w)),
+            )?;
+        }
+    }
     Ok(out)
 }
 
@@ -275,12 +320,28 @@ struct Shared {
     /// Live state (what the device shows).
     state: Mutex<DeviceState>,
     /// Last known settings: what `last_known.json` holds and a re-apply
-    /// restores. Lock order: `state` before `persisted`.
+    /// restores. Lock order: `save`, then `state`, then `persisted`.
     persisted: Mutex<DeviceState>,
+    /// Held while `last_known.json` is written, from taking the copy of
+    /// `persisted` until the file is in place, so an older copy can never be
+    /// written over a newer one (the session thread and [`Session::refresh`]
+    /// both save).
+    save: Mutex<()>,
     changed: Condvar,
 }
 
 impl Shared {
+    fn save_lock(&self) -> MutexGuard<'_, ()> {
+        self.save.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Write the last known settings as they are now.
+    fn save(&self, paths: &Option<Paths>) {
+        let _save = self.save_lock();
+        let s = self.persisted().clone();
+        persist(paths, &s);
+    }
+
     fn lock(&self) -> MutexGuard<'_, DeviceState> {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -342,6 +403,7 @@ impl Session {
         let shared = Arc::new(Shared {
             state: Mutex::new(initial.clone()),
             persisted: Mutex::new(initial),
+            save: Mutex::new(()),
             changed: Condvar::new(),
         });
         let stop = Arc::new(AtomicBool::new(false));
@@ -414,14 +476,11 @@ impl Session {
         // read: keep them (and don't remember the stale read as last known).
         let mut merged = g.clone();
         rebase_read(&mut merged, &before, &s);
-        let save = {
-            let mut p = self.shared.persisted();
-            merge_changes(&mut p, &g, &merged).then(|| p.clone())
-        };
+        let save = merge_changes(&mut self.shared.persisted(), &g, &merged);
         *g = merged.clone();
         drop(g);
-        if let Some(p) = save {
-            persist(&self.paths, &p);
+        if save {
+            self.shared.save(&self.paths);
         }
         Ok(merged)
     }
@@ -467,12 +526,17 @@ impl Worker {
             while let Ok(e) = self.events.try_recv() {
                 dirty |= self.handle(e);
             }
-            if std::mem::take(&mut self.scout_changed) {
+            // A Scout change seen while re-reading (Scout switched again)
+            // makes the reads stale: read again. Bounded; a flag still set
+            // is handled after the next event.
+            for _ in 0..3 {
+                if !std::mem::take(&mut self.scout_changed) {
+                    break;
+                }
                 dirty |= self.resync_scout();
             }
             if dirty {
-                let s = self.shared.persisted().clone();
-                persist(&self.paths, &s);
+                self.shared.save(&self.paths);
             }
         }
     }
@@ -501,15 +565,16 @@ impl Worker {
         dirty
     }
 
-    /// Scout was switched: re-read the settings Scout owns. When Scout turns
-    /// on, the device's push reports EQ off and leaves out the Scout curve and
-    /// Smart Volume (seen on hardware), so the pushes can't be trusted.
+    /// Scout was switched: re-read the settings Scout replaces (EQ, Smart
+    /// Volume, pre-amp). When Scout turns on, the device's push reports EQ off
+    /// and leaves out the Scout curve, Smart Volume and the 0 dB pre-amp (seen
+    /// on hardware), so the pushes can't be trusted.
     /// Returns whether the last known settings need saving.
     fn resync_scout(&mut self) -> bool {
         let mut read = Vec::new();
         for f in FEATURES
             .iter()
-            .filter(|f| f.exposed && features::scout_owned(f))
+            .filter(|f| f.exposed && features::scout_resets(f))
         {
             match self.device.read_feature(f) {
                 Ok(value) => read.push(Event::Changed(Change::Feature { feature: f, value })),
@@ -524,7 +589,7 @@ impl Worker {
         let mut dirty = false;
         while let Ok(e) = self.events.try_recv() {
             if let Event::Changed(Change::Feature { feature, .. }) = &e {
-                if features::scout_owned(feature) {
+                if features::scout_resets(feature) {
                     log::debug!("ignoring pushed {} after a Scout change", feature.name);
                     continue;
                 }
@@ -560,9 +625,11 @@ impl Worker {
             let intended = self.shared.persisted().clone();
             let reapplying = (!first || self.reapply_first) && intended.output.is_some();
             let mut fresh = intended.clone();
-            let synced = (|| -> Result<(), Error> {
+            // Ok(true) when every re-apply step (if any) went through.
+            let synced = (|| -> Result<bool, Error> {
                 let mut have = DeviceState::new();
                 have.refresh(&self.device)?;
+                let mut clean = true;
                 if reapplying {
                     let r = reapply(&self.device, &intended, &mut have)?;
                     if r.writes > 0 || !r.failures.is_empty() {
@@ -572,32 +639,37 @@ impl Worker {
                             r.failures.len()
                         );
                     }
+                    clean = r.failures.is_empty();
                 }
                 // The device is the truth now; the inactive profile stays.
-                fresh.refresh(&self.device)
+                fresh.refresh(&self.device)?;
+                Ok(clean)
             })();
-            if let Err(e) = synced {
-                if fatal(&e) {
-                    // The Disconnected event follows; the next Connected retries.
-                    log::warn!("sync after connect failed: {e}");
-                    return false;
-                }
-                // Still connected (e.g. a read timed out): no lifecycle
-                // event will come to retry, so retry here.
-                attempt += 1;
-                if attempt >= SYNC_ATTEMPTS {
-                    log::error!(
+            let reapplied_all = match synced {
+                Ok(clean) => reapplying && clean,
+                Err(e) => {
+                    if fatal(&e) {
+                        // The Disconnected event follows; the next Connected retries.
+                        log::warn!("sync after connect failed: {e}");
+                        return false;
+                    }
+                    // Still connected (e.g. a read timed out): no lifecycle
+                    // event will come to retry, so retry here.
+                    attempt += 1;
+                    if attempt >= SYNC_ATTEMPTS {
+                        log::error!(
                         "sync after connect failed {attempt} times, giving up until the next reconnect: {e}"
                     );
-                    return false;
+                        return false;
+                    }
+                    log::warn!("sync after connect failed (attempt {attempt}), retrying: {e}");
+                    if !self.pause(backoff) {
+                        return false;
+                    }
+                    backoff *= 2;
+                    continue;
                 }
-                log::warn!("sync after connect failed (attempt {attempt}), retrying: {e}");
-                if !self.pause(backoff) {
-                    return false;
-                }
-                backoff *= 2;
-                continue;
-            }
+            };
 
             // Events queued meanwhile are stale (startup dump, our own echoes).
             // They are forwarded but not applied; a lifecycle event decides.
@@ -625,10 +697,13 @@ impl Worker {
             // Without a re-apply the device's values are not taken as the
             // settings to restore (a replug may have reset them), unless
             // nothing was known yet; only the active output (jack state) and
-            // settings with no remembered value yet are.
+            // settings with no remembered value yet are. The same when a
+            // re-apply step failed: the device may still show the reset value
+            // of a setting that is meant to be restored.
             {
+                let _save = self.shared.save_lock();
                 let mut p = self.shared.persisted();
-                if reapplying || intended.output.is_none() {
+                if reapplied_all || intended.output.is_none() {
                     *p = fresh.clone();
                 } else {
                     p.output = fresh.output;
@@ -739,11 +814,18 @@ mod tests {
         let t = TempDir::new();
         let (s, rx) = start(&fake, cfg(&t, false));
 
+        // The re-read values are applied (and forwarded) in FEATURES order, so
+        // the last of them says all of them are in.
+        let last = FEATURES
+            .iter()
+            .rfind(|f| f.exposed && features::scout_resets(f))
+            .unwrap();
+
         // The push says "EQ off" and nothing about the curve or Smart Volume.
         fake.press_scout(true);
         wait_event(&rx, |e| {
             matches!(e, Event::Changed(Change::Feature { feature, value })
-                if feature.name == "smartvol_level" && *value == 0.9)
+                if feature.name == last.name && *value == 2.0)
         });
         let st = s.state();
         assert!(st.mask.unwrap().scout());
@@ -754,11 +836,36 @@ mod tests {
         fake.press_scout(false);
         wait_event(&rx, |e| {
             matches!(e, Event::Changed(Change::Feature { feature, value })
-                if feature.name == "eq_31" && *value == -1.0)
+                if feature.name == last.name && *value == 0.0)
         });
         let st = s.state();
         assert!(!st.mask.unwrap().scout());
+        assert_eq!(st.feature(feat("eq_31")), Some(-1.0));
         assert_eq!(st.feature(feat("eq")), Some(0.0));
+    }
+
+    #[test]
+    fn scout_pre_amp_is_re_read_and_restored() {
+        let fake = FakeDevice::new();
+        set(&fake, "eq_preamp", -5.5);
+        let t = TempDir::new();
+        let (s, rx) = start(&fake, cfg(&t, false));
+        assert_eq!(s.state().feature(feat("eq_preamp")), Some(-5.5));
+
+        // The push carries no pre-amp: the session re-reads it (0 dB).
+        fake.press_scout(true);
+        wait_event(&rx, |e| {
+            matches!(e, Event::Changed(Change::Feature { feature, value })
+                if feature.name == "eq_preamp" && *value == 0.0)
+        });
+        assert_eq!(s.state().feature(feat("eq_preamp")), Some(0.0));
+
+        fake.press_scout(false);
+        wait_event(&rx, |e| {
+            matches!(e, Event::Changed(Change::Feature { feature, value })
+                if feature.name == "eq_preamp" && *value == -5.5)
+        });
+        assert_eq!(s.state().feature(feat("eq_preamp")), Some(-5.5));
     }
 
     #[test]
@@ -802,6 +909,94 @@ mod tests {
             assert!(Instant::now() < deadline, "state / file never updated");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn lighting_writes_reach_the_state_and_the_file() {
+        let fake = FakeDevice::new();
+        let t = TempDir::new();
+        let (s, _rx) = start(&fake, cfg(&t, false));
+        assert_eq!(s.state().lighting_color, Some([255, 0, 0]));
+        s.device().set_lighting_color([0, 0, 255]).unwrap();
+        s.device().set_lighting_enabled(false).unwrap();
+        let file = Paths::under(t.path()).last_known_file();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let st = s.state();
+            let on_disk = store::read_json::<DeviceState>(&file).unwrap_or(None);
+            if st.lighting_color == Some([0, 0, 255])
+                && st.lighting_enabled == Some(false)
+                && on_disk.is_some_and(|d| {
+                    d.lighting_color == Some([0, 0, 255]) && d.lighting_enabled == Some(false)
+                })
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "state / file never updated");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn reconnect_reapplies_the_lighting() {
+        let fake = FakeDevice::new();
+        let t = TempDir::new();
+        let (s, rx) = start(&fake, cfg(&t, false));
+        s.device().set_lighting_color([0, 255, 0]).unwrap();
+        s.device().set_lighting_enabled(false).unwrap();
+        s.refresh().unwrap();
+
+        // USB replug: the LED comes back red and on.
+        fake.unplug();
+        wait_event(&rx, |e| *e == Event::Disconnected);
+        fake.set_lighting(true, [255, 0, 0]);
+        fake.replug();
+        wait_event(&rx, |e| *e == Event::Connected);
+
+        assert_eq!(fake.lighting_color(), [0, 255, 0]);
+        assert!(!fake.lighting_enabled());
+        let st = s.state();
+        assert_eq!(st.lighting_color, Some([0, 255, 0]));
+        assert_eq!(st.lighting_enabled, Some(false));
+    }
+
+    #[test]
+    fn reapply_does_not_touch_the_output() {
+        let fake = FakeDevice::new();
+        let (dev, _rx) = crate::state::tests::start(&fake);
+        let mut have = DeviceState::new();
+        have.refresh(&dev).unwrap();
+        // Remembered while on speakers; the jack now says headphones.
+        let mut want = have.clone();
+        want.output = Some(Output::Speakers);
+        let r = reapply(&dev, &want, &mut have).unwrap();
+        assert_eq!(r.writes, 0);
+        assert!(!fake
+            .written()
+            .iter()
+            .any(|f| f[1] == cmd::OUTPUT && f[3] == 0));
+        assert_eq!(fake.output(), Output::Headphones);
+    }
+
+    #[test]
+    fn old_last_known_without_lighting_loads_and_is_filled_in() {
+        let fake = FakeDevice::new();
+        fake.set_lighting(false, [1, 2, 3]);
+        let t = TempDir::new();
+        // Saved before the LED was tracked.
+        let file = Paths::under(t.path()).last_known_file();
+        store::write_json(
+            &file,
+            &serde_json::json!({"output": "headphones", "dac_filter": "nos"}),
+        )
+        .unwrap();
+        let (s, _rx) = start(&fake, cfg(&t, false));
+        assert_eq!(s.state().lighting_color, Some([1, 2, 3]));
+        drop(s);
+        let d = on_disk(&t);
+        assert_eq!(d.dac_filter, Some(DacFilter::Nos), "kept");
+        assert_eq!(d.lighting_color, Some([1, 2, 3]), "filled in");
+        assert_eq!(d.lighting_enabled, Some(false), "filled in");
     }
 
     #[test]
@@ -999,11 +1194,8 @@ mod tests {
         set(&fake, "dialog", 1.0);
         // The first output read after connecting gets no answer.
         fake.drop_replies(cmd::OUTPUT, 1);
-        let (s, rx) = Session::start(
-            Box::new(fake.connector()),
-            fast(),
-            cfg(&TempDir::new(), false),
-        );
+        let t = TempDir::new();
+        let (s, rx) = Session::start(Box::new(fake.connector()), fast(), cfg(&t, false));
         assert!(s.wait_connected(Duration::from_secs(3)));
         assert_eq!(s.state().feature(feat("dialog")), Some(1.0));
         wait_event(&rx, |e| *e == Event::Connected);
@@ -1013,7 +1205,8 @@ mod tests {
     fn mask_filter_and_boost_timeouts_do_not_fail_the_sync() {
         let fake = FakeDevice::new();
         fake.drop_replies(cmd::MASK, 1);
-        let (s, _rx) = start(&fake, cfg(&TempDir::new(), false));
+        let t = TempDir::new();
+        let (s, _rx) = start(&fake, cfg(&t, false));
         assert_eq!(s.state().output, Some(Output::Headphones));
     }
 
@@ -1022,14 +1215,16 @@ mod tests {
         let fake = FakeDevice::new();
         // The user's own EQ with Scout off.
         set(&fake, "eq_1k", 5.0);
+        set(&fake, "eq_preamp", -5.5);
         let (dev, _rx) = crate::state::tests::start(&fake);
-        // Remembered while Scout was on: Scout's curve and Smart Volume.
+        // Remembered while Scout was on: Scout's curve, Smart Volume, 0 dB pre-amp.
         let mut want = DeviceState::new();
         want.output = Some(Output::Headphones);
         want.mask = Some(Mask(Mask::SCOUT));
         want.headphones.set(feat("eq"), 1.0);
         want.headphones.set(feat("smartvol"), 1.0);
         want.headphones.set(feat("smartvol_level"), 0.9);
+        want.headphones.set(feat("eq_preamp"), 0.0);
         for (i, v) in crate::transport::fake::SCOUT_CURVE.iter().enumerate() {
             want.headphones
                 .set(crate::features::eq_band(i).unwrap(), *v);
@@ -1051,6 +1246,7 @@ mod tests {
         assert_eq!(get(&fake, "eq_1k"), 5.0);
         assert_eq!(get(&fake, "eq"), 0.0);
         assert_eq!(get(&fake, "smartvol"), 0.0);
+        assert_eq!(get(&fake, "eq_preamp"), -5.5, "not remembered as 0");
     }
 
     #[test]
@@ -1062,11 +1258,30 @@ mod tests {
         s.refresh().unwrap();
         fake.unplug();
         wait_event(&rx, |e| *e == Event::Disconnected);
-        set(&fake, "dialog", 0.0);
+        // Slow enough that the push below lands while the sync is reading.
+        fake.set_write_delay(Duration::from_millis(1));
+        let before = fake.written().len();
         fake.replug();
-        // The device announces its (reset) state right after connecting.
+        // A dump queued while the session syncs is older than the sync's own
+        // reads: here it says Dialog off, but the device reads back on (so no
+        // re-apply echo follows that would hide a wrongly applied dump).
+        // Pushed once the sync has read Dialog and moved on to the mic
+        // features (a push queued before the connect would be dropped).
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !fake.written()[before..]
+            .iter()
+            .any(|f| f[1] == cmd::FEATURE_READ && f[4] == crate::features::FAMILY_MIC)
+        {
+            assert!(Instant::now() < deadline, "no sync after the replug");
+            thread::sleep(Duration::from_millis(1));
+        }
         fake.push_raw(&[0x5a, 0x11, 0x08, 0x01, 0x00, 0x96, 0x02, 0, 0, 0, 0]);
         wait_event(&rx, |e| *e == Event::Connected);
+        // The dump was delivered (forwarded after Connected), not applied.
+        wait_event(&rx, |e| {
+            matches!(e, Event::Changed(Change::Feature { feature, value })
+                if feature.name == "dialog" && *value == 0.0)
+        });
         thread::sleep(Duration::from_millis(100));
         assert_eq!(get(&fake, "dialog"), 1.0);
         assert_eq!(s.state().feature(feat("dialog")), Some(1.0));
@@ -1141,6 +1356,129 @@ mod tests {
         reapply(&dev, &want, &mut have).unwrap();
         assert_eq!(fake.mask(), Mask::SBX);
         assert_eq!(get(&fake, "eq_31"), 3.0);
+    }
+
+    #[test]
+    fn reapply_with_scout_on_keeps_the_users_sbx() {
+        let fake = FakeDevice::new();
+        fake.press_mask(Mask::SBX);
+        let (dev, _rx) = crate::state::tests::start(&fake);
+        let mut have = DeviceState::new();
+        have.refresh(&dev).unwrap();
+        // Remembered while Scout was on: the mask hides SBX.
+        let mut want = have.clone();
+        want.mask = Some(Mask(Mask::SCOUT));
+        let r = reapply(&dev, &want, &mut have).unwrap();
+        assert_eq!(r.writes, 1, "scout on only: {r:?}");
+        assert_eq!(fake.mask(), Mask::SCOUT);
+        dev.set_mask(MaskTarget::Scout, false).unwrap();
+        assert_eq!(fake.mask(), Mask::SBX, "SBX back with Scout off");
+    }
+
+    #[test]
+    fn failed_reapply_keeps_the_setting_to_restore() {
+        let fake = FakeDevice::new();
+        let t = TempDir::new();
+        let (s, rx) = start(&fake, cfg(&t, false));
+        s.device().write_feature(feat("surround"), 1.0).unwrap();
+        s.refresh().unwrap();
+
+        // USB replug resets Surround, and its re-apply write is refused.
+        fake.unplug();
+        wait_event(&rx, |e| *e == Event::Disconnected);
+        set(&fake, "surround", 0.0);
+        fake.reject_next_write(0x81);
+        fake.replug();
+        wait_event(&rx, |e| *e == Event::Connected);
+        assert_eq!(get(&fake, "surround"), 0.0);
+        assert_eq!(s.state().feature(feat("surround")), Some(0.0), "live");
+        assert_eq!(
+            on_disk(&t).headphones.get(feat("surround")),
+            Some(1.0),
+            "still to be restored"
+        );
+
+        // The next reconnect restores it.
+        fake.unplug();
+        wait_event(&rx, |e| *e == Event::Disconnected);
+        fake.replug();
+        wait_event(&rx, |e| *e == Event::Connected);
+        assert_eq!(get(&fake, "surround"), 1.0);
+    }
+
+    #[test]
+    fn scout_switched_again_while_re_reading_is_re_read() {
+        let fake = FakeDevice::new();
+        set(&fake, "eq_31", -1.0);
+        set(&fake, "eq_preamp", -5.5);
+        let t = TempDir::new();
+        let (s, rx) = start(&fake, cfg(&t, false));
+        // Slow reads, so Scout goes off again while they run.
+        fake.set_write_delay(Duration::from_millis(15));
+        fake.press_scout(true);
+        wait_event(
+            &rx,
+            |e| matches!(e, Event::Changed(Change::Mask(m)) if m.scout()),
+        );
+        thread::sleep(Duration::from_millis(50));
+        fake.press_scout(false);
+
+        // Without a second re-read the values read under Scout stay.
+        let owned: Vec<_> = FEATURES
+            .iter()
+            .filter(|f| f.exposed && features::scout_resets(f))
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let st = s.state();
+            let p = on_disk(&t);
+            let ok = !st.mask.unwrap().scout()
+                && owned.iter().all(|f| {
+                    let want = Some(fake.feature(f.family, f.id).unwrap());
+                    st.feature(f) == want && p.headphones.get(f) == want
+                });
+            if ok {
+                break;
+            }
+            assert!(Instant::now() < deadline, "Scout's values kept: {st:?}");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(s.state().feature(feat("eq_31")), Some(-1.0));
+        assert_eq!(s.state().feature(feat("eq_preamp")), Some(-5.5));
+    }
+
+    #[test]
+    fn concurrent_saves_leave_the_newest_state_on_disk() {
+        // Not a deterministic reproduction of the race (it needs one save to
+        // stall in fsync); checks that saves from the session thread and from
+        // refresh callers end with the file matching the remembered state.
+        let fake = FakeDevice::new();
+        let t = TempDir::new();
+        let (s, _rx) = start(&fake, cfg(&t, false));
+        let s = Arc::new(s);
+        let refresher = {
+            let s = s.clone();
+            thread::spawn(move || {
+                for _ in 0..5 {
+                    s.refresh().unwrap();
+                }
+            })
+        };
+        for i in 0..10 {
+            s.device()
+                .write_feature(feat("eq_1k"), i as f32 * 0.5)
+                .unwrap();
+            // A change no event carries: only refresh saves it.
+            set(&fake, "eq_2k", i as f32);
+        }
+        refresher.join().unwrap();
+        s.refresh().unwrap();
+        thread::sleep(Duration::from_millis(200));
+        let mut want = s.shared.persisted().clone();
+        want.connected = false;
+        assert_eq!(on_disk(&t), want);
+        assert_eq!(want.headphones.get(feat("eq_1k")), Some(4.5));
+        assert_eq!(want.headphones.get(feat("eq_2k")), Some(9.0));
     }
 
     #[test]

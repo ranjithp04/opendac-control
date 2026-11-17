@@ -1,12 +1,24 @@
 //! Our Direct Mode: save state, disable SBX / Scout / EQ, restore on exit.
 //!
-//! Creative's own Direct Mode command (`0x39`) is not used: its status cannot be decoded.
 //! Enabling saves {SBX / Scout mask, EQ enable, effect toggles} to disk
 //! **before** anything on the device is changed, so a crash or a failed
 //! write never loses the user's settings; then it switches Scout, SBX and EQ
 //! off. Disabling restores what was saved and deletes the file. The mic is
 //! never touched (the Voice Clarity bit of the mask is left alone), and
 //! neither is the EQ pre-amp or any EQ band: only the EQ on/off switch.
+//!
+//! Creative's hardware Direct Mode (`0x39`, `docs/protocol-g6.md` §2.2a) is an
+//! extra step: switched on last when enabling (and verified by reading it
+//! back), and off first when disabling. It changes only the audio path, so a
+//! failing step when enabling is logged and the software Direct Mode carries
+//! on. When disabling, a hardware mode that is still on after the step is a
+//! failed step: the saved state is kept so `disable` can be retried.
+//!
+//! Disabling switches Scout off before restoring anything (the Scout button
+//! still works while Direct Mode is on), and turns it back on last if it was
+//! on before Direct Mode. The same holds for a restore still pending for an
+//! output after Direct Mode is off: with Scout on, it is switched off, the
+//! restore written, and Scout switched on again.
 //!
 //! Playback settings are per output. The saved state therefore has one entry
 //! per output that was active while Direct Mode was on, and the mask is saved
@@ -60,6 +72,11 @@ pub struct SavedState {
     pub mask: Option<SavedMask>,
     /// Keyed by output name (`headphones` / `speakers`).
     pub outputs: BTreeMap<String, SavedOutput>,
+    /// Direct Mode is off, but a restore switched Scout off and it still has
+    /// to go back on (the step failed; `disable` finishes it). Absent in
+    /// older files and when `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scout_back: bool,
 }
 
 /// Direct Mode errors.
@@ -130,6 +147,22 @@ fn fatal(e: &events::Error) -> bool {
     )
 }
 
+/// Switch the hardware Direct Mode, best effort: a step the device refuses
+/// is logged, not an error. A lost device is still one.
+fn hw_direct(dev: &Device, on: bool) -> Result<(), Error> {
+    match dev.set_hw_direct(on) {
+        Ok(_) => Ok(()),
+        Err(e) if fatal(&e) => Err(Error::Device(e)),
+        Err(e) => {
+            log::warn!(
+                "hardware direct mode {}: {e}",
+                if on { "on" } else { "off" }
+            );
+            Ok(())
+        }
+    }
+}
+
 /// Collects step failures; stops early when the device is lost.
 struct Steps(Vec<String>);
 
@@ -194,14 +227,17 @@ impl DirectMode {
             active: false,
             mask: None,
             outputs: BTreeMap::new(),
+            scout_back: false,
         });
         let first_save = !saved.active;
         if first_save {
             saved.active = true;
             saved.mask = Some(SavedMask {
                 sbx: mask.sbx(),
-                scout: mask.scout(),
+                // Off only because a restore switched it off: it is the user's.
+                scout: mask.scout() || saved.scout_back,
             });
+            saved.scout_back = false;
         }
         let new_entry = !saved.outputs.contains_key(&key);
         saved.outputs.entry(key.clone()).or_insert(current);
@@ -242,6 +278,7 @@ impl DirectMode {
                 steps.run("eq off", dev.write_feature(feat(EQ), 0.0))?;
             }
         }
+        hw_direct(dev, true)?;
         steps.finish()
     }
 
@@ -253,10 +290,51 @@ impl DirectMode {
         let key = output_name(output);
         let mut steps = Steps(Vec::new());
 
+        // Hardware Direct Mode first; it pushes a dump of the (still direct)
+        // profile, which the restore below then overwrites. Unlike enable, a
+        // failure here is a failed step: forgetting the saved state would
+        // leave the device in hardware Direct Mode with nothing to retry.
+        let mut hw_done = true;
+        if saved.active {
+            if let Err(e) = dev.set_hw_direct(false) {
+                if fatal(&e) {
+                    return Err(Error::Device(e));
+                }
+                // A refused write is harmless if the mode is off anyway.
+                if !matches!(dev.read_hw_direct(), Ok(false)) {
+                    steps.run("hardware direct mode off", Err::<(), _>(e))?;
+                    hw_done = false;
+                }
+            }
+        }
+
+        // Scout may have been turned on meanwhile (its button is not blocked):
+        // switch it off first, or the device would undo the restore below
+        // when Scout goes off. If that fails, restore nothing. Direct Mode
+        // already off (only this output's restore pending), Scout on is the
+        // user's choice: it goes back on after the restore. Without an entry
+        // for this output there is nothing to restore and Scout is left alone.
+        let mut scout_off = true;
+        // A failed "scout on" of an earlier attempt is finished here too.
+        let mut scout_back = saved.scout_back && !saved.active;
+        let has_entry = saved.outputs.contains_key(key);
+        if (saved.active || has_entry) && dev.read_mask()?.scout() {
+            if !saved.active {
+                // On disk before Scout goes off, so a failure further on
+                // leaves a retry able to switch it on again.
+                saved.scout_back = true;
+                store::write_json(&self.path, &saved)?;
+            }
+            scout_off = steps
+                .run("scout off", dev.set_mask(MaskTarget::Scout, false))?
+                .is_some();
+            scout_back = scout_off && !saved.active;
+        }
+
         // Effects and EQ enable first, then SBX, then Scout last: turning
         // Scout on makes the device apply its own curve / Smart Volume.
-        let mut entry_done = true;
-        if let Some(entry) = saved.outputs.get(key) {
+        let mut entry_done = scout_off;
+        if let Some(entry) = saved.outputs.get(key).filter(|_| scout_off) {
             let mut all_ok = true;
             let mut restore = |name: &str, want: bool| -> Result<(), Error> {
                 let f = feat(name);
@@ -282,8 +360,8 @@ impl DirectMode {
             entry_done = all_ok;
         }
 
-        let mut mask_done = true;
-        if saved.active {
+        let mut mask_done = scout_off && hw_done;
+        if saved.active && scout_off {
             if let Some(m) = saved.mask {
                 let before = steps.0.len();
                 for (target, want) in [(MaskTarget::Sbx, m.sbx), (MaskTarget::Scout, m.scout)] {
@@ -296,19 +374,30 @@ impl DirectMode {
                         steps.run(&format!("{target:?}"), dev.set_mask(target, want))?;
                     }
                 }
-                mask_done = steps.0.len() == before;
+                mask_done &= steps.0.len() == before;
             }
         }
+        let mut scout_on_done = true;
+        if scout_back {
+            let r = match dev.read_mask() {
+                Ok(m) if m.scout() => Ok(()),
+                Ok(_) => dev.set_mask(MaskTarget::Scout, true).map(|_| ()),
+                Err(e) => Err(e),
+            };
+            scout_on_done = steps.run("scout on", r)?.is_some();
+        }
+        saved.scout_back = scout_back && !scout_on_done;
 
-        // Forget only what was restored.
-        if entry_done {
+        // Forget only what was restored; the entry stays until Scout is back
+        // on, so the output still counts as pending.
+        if entry_done && scout_on_done {
             saved.outputs.remove(key);
         }
         if mask_done && saved.active {
             saved.active = false;
             saved.mask = None;
         }
-        if saved.outputs.is_empty() && !saved.active {
+        if saved.outputs.is_empty() && !saved.active && !saved.scout_back {
             store::remove_file(&self.path)?;
         } else {
             store::write_json(&self.path, &saved)?;
@@ -386,6 +475,136 @@ mod tests {
         assert_eq!(get(&fake, "surround"), 1.0);
         assert_eq!(get(&fake, "surround_level"), 0.6);
         assert_eq!(get(&fake, "bass"), 1.0);
+    }
+
+    /// Index of the first / last frame with `command` written so far.
+    fn frame_positions(fake: &FakeDevice, command: u8) -> Vec<usize> {
+        fake.written()
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f[1] == command)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    #[test]
+    fn hardware_direct_mode_follows_the_software_one() {
+        let fake = FakeDevice::new();
+        user_setup(&fake);
+        let (dev, _rx) = start(&fake);
+        let t = TempDir::new();
+        let d = DirectMode::new(t.path().join("d.json"));
+
+        d.enable(&dev).unwrap();
+        assert!(fake.hw_direct(), "on after enable");
+        // Switched on after SBX and EQ went off (the last device writes).
+        let hw = frame_positions(&fake, crate::protocol::cmd::HW_DIRECT);
+        let other = frame_positions(&fake, crate::protocol::cmd::FEATURE_WRITE);
+        assert!(hw[0] > *other.last().unwrap(), "hw step is last");
+        let before_disable = fake.written().len();
+
+        d.disable(&dev).unwrap();
+        assert!(!fake.hw_direct(), "off after disable");
+        // Switched off before the saved state is restored.
+        let written = fake.written();
+        let first_restore = written[before_disable..]
+            .iter()
+            .position(|f| f[1] == crate::protocol::cmd::FEATURE_WRITE)
+            .unwrap();
+        let hw_off = written[before_disable..]
+            .iter()
+            .position(|f| f[1] == crate::protocol::cmd::HW_DIRECT)
+            .unwrap();
+        assert!(hw_off < first_restore, "hw step is first");
+        assert_eq!(get(&fake, EQ), 1.0);
+        assert_eq!(fake.mask(), Mask::SBX | Mask::VOICE_CLARITY);
+    }
+
+    #[test]
+    fn a_failing_hardware_step_does_not_break_software_direct_mode() {
+        let fake = FakeDevice::new();
+        user_setup(&fake);
+        let (dev, _rx) = start(&fake);
+        let t = TempDir::new();
+        let d = DirectMode::new(t.path().join("d.json"));
+        // The device never answers the 0x39 write and its read-back.
+        fake.drop_replies(crate::protocol::cmd::HW_DIRECT, 2);
+        d.enable(&dev).unwrap();
+        assert!(d.is_active().unwrap());
+        assert!(!fake.hw_direct());
+        assert_eq!(get(&fake, EQ), 0.0);
+        d.disable(&dev).unwrap();
+        assert_eq!(get(&fake, EQ), 1.0);
+        assert!(!d.path().exists());
+
+        // Rejected (nothing else to switch off, so the 0x39 write is the first).
+        let fake = FakeDevice::new();
+        let (dev, _rx) = start(&fake);
+        fake.reject_next_write(0x83);
+        d.enable(&dev).unwrap();
+        assert!(d.is_active().unwrap());
+        assert!(!fake.hw_direct());
+        fake.reject_next_write(0x83);
+        d.disable(&dev).unwrap();
+        assert!(!d.path().exists());
+    }
+
+    #[test]
+    fn hardware_mode_left_on_by_disable_keeps_the_saved_state() {
+        let fake = FakeDevice::new();
+        user_setup(&fake);
+        let (dev, _rx) = start(&fake);
+        let t = TempDir::new();
+        let d = DirectMode::new(t.path().join("d.json"));
+        d.enable(&dev).unwrap();
+        assert!(fake.hw_direct());
+        // The 0x39 off write is refused: the device stays in hardware Direct Mode.
+        fake.reject_next_write(0x83);
+        assert!(matches!(d.disable(&dev), Err(Error::Incomplete(_))));
+        assert!(fake.hw_direct());
+        assert!(d.is_active().unwrap(), "kept for a retry");
+        // The rest was restored meanwhile.
+        assert_eq!(get(&fake, EQ), 1.0);
+        assert_eq!(fake.mask(), Mask::SBX | Mask::VOICE_CLARITY);
+
+        d.disable(&dev).unwrap();
+        assert!(!fake.hw_direct());
+        assert!(!d.path().exists());
+    }
+
+    #[test]
+    fn scout_pressed_while_active_does_not_undo_the_restore() {
+        let fake = FakeDevice::new();
+        user_setup(&fake); // EQ on, SBX on, Scout off
+        let (dev, _rx) = start(&fake);
+        let t = TempDir::new();
+        let d = DirectMode::new(t.path().join("d.json"));
+        d.enable(&dev).unwrap();
+        // The Scout button: the device remembers Direct Mode's EQ off / SBX off.
+        fake.press_scout(true);
+        d.disable(&dev).unwrap();
+        assert_eq!(fake.mask() & Mask::SCOUT, 0, "Scout was off before");
+        assert_eq!(fake.mask() & Mask::SBX, Mask::SBX);
+        assert_eq!(get(&fake, EQ), 1.0, "the user's EQ enable");
+        assert_eq!(get(&fake, "smartvol"), 0.0);
+        assert!(!d.path().exists());
+    }
+
+    #[test]
+    fn scout_pressed_while_active_with_scout_saved_on() {
+        let fake = FakeDevice::new();
+        set(&fake, EQ, 1.0);
+        let (dev, _rx) = start(&fake);
+        dev.set_mask(MaskTarget::Scout, true).unwrap();
+        let t = TempDir::new();
+        let d = DirectMode::new(t.path().join("d.json"));
+        d.enable(&dev).unwrap(); // Scout off, the user's EQ on, then EQ off
+        fake.press_scout(true);
+        d.disable(&dev).unwrap();
+        assert_eq!(fake.mask() & Mask::SCOUT, Mask::SCOUT);
+        // Turning Scout off later brings back the user's EQ, not Direct Mode's.
+        dev.set_mask(MaskTarget::Scout, false).unwrap();
+        assert_eq!(get(&fake, EQ), 1.0);
     }
 
     #[test]
@@ -478,6 +697,32 @@ mod tests {
     }
 
     #[test]
+    fn pre_amp_is_never_written_and_survives_scout() {
+        let fake = FakeDevice::new();
+        set(&fake, "eq_preamp", -5.5);
+        let (dev, _rx) = start(&fake);
+        // Scout on by a write: the device sets the pre-amp to 0 dB.
+        dev.set_mask(MaskTarget::Scout, true).unwrap();
+        assert_eq!(get(&fake, "eq_preamp"), 0.0);
+        let t = TempDir::new();
+        let d = DirectMode::new(t.path().join("d.json"));
+        let before = fake.written().len();
+        d.enable(&dev).unwrap();
+        assert_eq!(get(&fake, "eq_preamp"), -5.5, "restored by Scout off");
+        d.disable(&dev).unwrap();
+        assert_eq!(get(&fake, "eq_preamp"), 0.0, "Scout is on again");
+        let id = crate::features::by_name("eq_preamp").unwrap().id;
+        let wrote_preamp = fake.written()[before..].iter().any(|f| {
+            f[1] == crate::protocol::cmd::FEATURE_WRITE
+                && f[4] == crate::features::FAMILY_PLAYBACK
+                && f[5] == id
+        });
+        assert!(!wrote_preamp, "Direct Mode wrote the pre-amp");
+        dev.set_mask(MaskTarget::Scout, false).unwrap();
+        assert_eq!(get(&fake, "eq_preamp"), -5.5);
+    }
+
+    #[test]
     fn scout_settings_are_not_saved_as_the_users() {
         let fake = FakeDevice::new();
         // The user's settings: EQ off, Smart Volume off, own EQ curve.
@@ -556,6 +801,120 @@ mod tests {
         d.disable(&dev).unwrap();
         assert!(!d.path().exists());
         assert_eq!(get(&fake, EQ), 1.0);
+    }
+
+    #[test]
+    fn pending_restore_is_not_written_under_scout() {
+        let fake = FakeDevice::new();
+        user_setup(&fake); // headphones: EQ on, SBX on
+        let (dev, _rx) = start(&fake);
+        let t = TempDir::new();
+        let d = DirectMode::new(t.path().join("d.json"));
+        d.enable(&dev).unwrap();
+        fake.switch_output(Output::Speakers);
+        set(&fake, EQ, 1.0);
+        d.enable(&dev).unwrap();
+        d.disable(&dev).unwrap(); // speakers restored, headphones pending
+        assert_eq!(d.pending_outputs().unwrap(), vec![Output::Headphones]);
+        assert!(!d.is_active().unwrap());
+
+        // Back on headphones, where the user has Scout on.
+        fake.switch_output(Output::Headphones);
+        set(&fake, EQ, 0.0); // still Direct Mode's EQ off (the fake is not per output)
+        dev.set_mask(MaskTarget::Scout, true).unwrap();
+        d.disable(&dev).unwrap();
+        assert!(!d.path().exists(), "restore done");
+        assert_eq!(fake.mask() & Mask::SCOUT, Mask::SCOUT, "Scout stays on");
+        // Turning Scout off brings back the restored EQ, not Direct Mode's.
+        dev.set_mask(MaskTarget::Scout, false).unwrap();
+        assert_eq!(get(&fake, EQ), 1.0);
+        assert_eq!(get(&fake, "smartvol"), 0.0);
+    }
+
+    #[test]
+    fn failed_scout_on_after_a_pending_restore_can_be_finished() {
+        let fake = FakeDevice::new();
+        user_setup(&fake);
+        let (dev, _rx) = start(&fake);
+        let t = TempDir::new();
+        let d = DirectMode::new(t.path().join("d.json"));
+        d.enable(&dev).unwrap();
+        fake.switch_output(Output::Speakers);
+        set(&fake, EQ, 1.0);
+        d.enable(&dev).unwrap();
+        d.disable(&dev).unwrap(); // headphones pending
+        fake.switch_output(Output::Headphones);
+        dev.set_mask(MaskTarget::Scout, true).unwrap();
+
+        // Scout off goes through, the restore needs no write, the "scout on" is refused.
+        fake.reject_write_after(1, 0x81);
+        assert!(matches!(d.disable(&dev), Err(Error::Incomplete(_))));
+        assert_eq!(fake.mask() & Mask::SCOUT, 0, "left off");
+        assert!(d.saved().unwrap().unwrap().scout_back);
+        assert_eq!(d.pending_outputs().unwrap(), vec![Output::Headphones]);
+
+        // The retry switches Scout back on and clears the file.
+        d.disable(&dev).unwrap();
+        assert_eq!(fake.mask() & Mask::SCOUT, Mask::SCOUT);
+        assert!(!d.path().exists());
+        dev.set_mask(MaskTarget::Scout, false).unwrap();
+        assert_eq!(get(&fake, EQ), 1.0);
+    }
+
+    #[test]
+    fn scout_back_flag_is_optional_in_the_file() {
+        let old = r#"{"version":1,"active":false,"mask":null,"outputs":{}}"#;
+        let s: SavedState = serde_json::from_str(old).unwrap();
+        assert!(!s.scout_back);
+        assert_eq!(serde_json::to_string(&s).unwrap(), old.replace(" ", ""));
+    }
+
+    #[test]
+    fn enabling_after_a_failed_scout_on_keeps_scout_in_the_saved_mask() {
+        let fake = FakeDevice::new();
+        user_setup(&fake);
+        let (dev, _rx) = start(&fake);
+        let t = TempDir::new();
+        let d = DirectMode::new(t.path().join("d.json"));
+        d.enable(&dev).unwrap();
+        fake.switch_output(Output::Speakers);
+        set(&fake, EQ, 1.0);
+        d.enable(&dev).unwrap();
+        d.disable(&dev).unwrap();
+        fake.switch_output(Output::Headphones);
+        dev.set_mask(MaskTarget::Scout, true).unwrap();
+        fake.reject_write_after(1, 0x81);
+        assert!(d.disable(&dev).is_err());
+        // Direct Mode on again while Scout is (wrongly) off: Scout is still the user's.
+        d.enable(&dev).unwrap();
+        let s = d.saved().unwrap().unwrap();
+        assert!(s.mask.unwrap().scout && !s.scout_back);
+        d.disable(&dev).unwrap();
+        assert_eq!(fake.mask() & Mask::SCOUT, Mask::SCOUT);
+    }
+
+    #[test]
+    fn pending_restore_for_another_output_leaves_scout_alone() {
+        let fake = FakeDevice::new();
+        user_setup(&fake);
+        let (dev, _rx) = start(&fake);
+        let t = TempDir::new();
+        let d = DirectMode::new(t.path().join("d.json"));
+        d.enable(&dev).unwrap();
+        fake.switch_output(Output::Speakers);
+        d.enable(&dev).unwrap();
+        d.disable(&dev).unwrap(); // headphones pending
+                                  // Scout on, on the output with nothing pending: no Scout writes.
+        dev.set_mask(MaskTarget::Scout, true).unwrap();
+        let before = fake.written().len();
+        d.disable(&dev).unwrap();
+        assert!(d.path().exists(), "headphones still pending");
+        let scout_writes = fake.written()[before..]
+            .iter()
+            .filter(|f| f[1] == crate::protocol::cmd::MASK && f[3] == 0x07)
+            .count();
+        assert_eq!(scout_writes, 0);
+        assert_eq!(fake.mask() & Mask::SCOUT, Mask::SCOUT);
     }
 
     #[test]

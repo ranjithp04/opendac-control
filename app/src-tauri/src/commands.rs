@@ -10,14 +10,17 @@
 
 use std::sync::Arc;
 
+use g6_core::store;
 use tauri::State;
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_dialog::DialogExt;
 
 use crate::api::{
-    ApiError, ApiResult, AppState, DacFilter, DolbyMode, EffectName, EqCurve, ErrorCode,
-    SmartVolumeMode,
+    ApiError, ApiResult, AppState, DacFilter, DeviceInfo, DolbyMode, EffectName, EqCurve, EqImport,
+    ErrorCode, MicEqCurve, MixerScope, Output, SmartVolumeMode,
 };
 use crate::backend::Backend;
+use crate::hotkeys::HotkeySettings;
 
 type Shared<'a> = State<'a, Arc<Backend>>;
 
@@ -48,6 +51,13 @@ pub async fn refresh_state(backend: Shared<'_>) -> ApiResult<AppState> {
     blocking(&backend, |b| b.refresh_state()).await
 }
 
+/// Firmware, serial, DSP version and hardware id. Cached per connection; a
+/// field the device did not answer is `null`.
+#[tauri::command]
+pub async fn get_device_info(backend: Shared<'_>) -> ApiResult<DeviceInfo> {
+    blocking(&backend, |b| Ok(b.device_info())).await
+}
+
 // --- EQ, SBX, Scout ----------------------------------------------------------
 
 #[tauri::command]
@@ -67,7 +77,8 @@ pub async fn set_eq_bands(backend: Shared<'_>, gains: Vec<f32>) -> ApiResult<App
     blocking(&backend, move |b| b.set_eq_bands(&gains)).await
 }
 
-/// EQ pre-amp, `db` -6..=6 in 0.5 steps. Allowed while Scout is on.
+/// EQ pre-amp, `db` -6..=6 in 0.5 steps. Allowed while Scout is on (the G6
+/// shows 0 dB then and restores the old value when Scout turns off).
 #[tauri::command]
 pub async fn set_eq_preamp(backend: Shared<'_>, db: f32) -> ApiResult<AppState> {
     blocking(&backend, move |b| b.set_eq_preamp(db)).await
@@ -99,6 +110,36 @@ pub async fn save_eq_curve(backend: Shared<'_>, name: String) -> ApiResult<AppSt
 #[tauri::command]
 pub async fn delete_eq_curve(backend: Shared<'_>, name: String) -> ApiResult<AppState> {
     blocking(&backend, move |b| b.delete_eq_curve(&name)).await
+}
+
+// --- Mic EQ bands and curves -----------------------------------------------
+
+/// `band` 0..=7 (mic EQ bands 1..=8), `gain` -12..=12 dB in 0.5 steps.
+#[tauri::command]
+pub async fn set_mic_eq_band(backend: Shared<'_>, band: u8, gain: f32) -> ApiResult<AppState> {
+    blocking(&backend, move |b| b.set_mic_eq_band(band, gain)).await
+}
+
+/// Write all 8 mic EQ bands of a curve or preset and turn mic EQ on.
+#[tauri::command]
+pub async fn apply_mic_eq_curve(backend: Shared<'_>, bands: Vec<f32>) -> ApiResult<AppState> {
+    blocking(&backend, move |b| b.apply_mic_eq_curve(&bands)).await
+}
+
+#[tauri::command]
+pub async fn list_mic_eq_curves(backend: Shared<'_>) -> ApiResult<Vec<MicEqCurve>> {
+    blocking(&backend, |b| b.list_mic_eq_curves()).await
+}
+
+/// Save the active output's current mic EQ bands under `name`.
+#[tauri::command]
+pub async fn save_mic_eq_curve(backend: Shared<'_>, name: String) -> ApiResult<AppState> {
+    blocking(&backend, move |b| b.save_mic_eq_curve(&name)).await
+}
+
+#[tauri::command]
+pub async fn delete_mic_eq_curve(backend: Shared<'_>, name: String) -> ApiResult<AppState> {
+    blocking(&backend, move |b| b.delete_mic_eq_curve(&name)).await
 }
 
 #[tauri::command]
@@ -188,8 +229,50 @@ pub async fn set_dac_filter(backend: Shared<'_>, filter: DacFilter) -> ApiResult
 }
 
 #[tauri::command]
+pub async fn set_lighting_enabled(backend: Shared<'_>, enabled: bool) -> ApiResult<AppState> {
+    blocking(&backend, move |b| b.set_lighting_enabled(enabled)).await
+}
+
+#[tauri::command]
+pub async fn set_lighting_color(backend: Shared<'_>, color: String) -> ApiResult<AppState> {
+    blocking(&backend, move |b| b.set_lighting_color(&color)).await
+}
+
+#[tauri::command]
+pub async fn set_output(backend: Shared<'_>, output: Output) -> ApiResult<AppState> {
+    blocking(&backend, move |b| b.set_output(output)).await
+}
+
+#[tauri::command]
 pub async fn set_dolby_decoder(backend: Shared<'_>, mode: DolbyMode) -> ApiResult<AppState> {
     blocking(&backend, move |b| b.set_dolby_decoder(mode)).await
+}
+
+// --- Mixer (USB audio controls, macOS only) ---------------------------------
+
+/// `volume` 0..=1, both channels. Rejects `mixerUnavailable` where the OS offers no such control.
+#[tauri::command]
+pub async fn set_mixer_volume(
+    backend: Shared<'_>,
+    scope: MixerScope,
+    volume: f32,
+) -> ApiResult<AppState> {
+    blocking(&backend, move |b| b.set_mixer_volume(scope, volume)).await
+}
+
+#[tauri::command]
+pub async fn set_mixer_mute(
+    backend: Shared<'_>,
+    scope: MixerScope,
+    mute: bool,
+) -> ApiResult<AppState> {
+    blocking(&backend, move |b| b.set_mixer_mute(scope, mute)).await
+}
+
+/// Select the recording source; `id` is one of `mixer.recordingSource.options`.
+#[tauri::command]
+pub async fn set_mixer_source(backend: Shared<'_>, id: u32) -> ApiResult<AppState> {
+    blocking(&backend, move |b| b.set_mixer_source(id)).await
 }
 
 #[tauri::command]
@@ -225,6 +308,63 @@ pub async fn delete_preset(backend: Shared<'_>, name: String) -> ApiResult<AppSt
     blocking(&backend, move |b| b.delete_preset(&name)).await
 }
 
+/// Export profile `name` as a JSON file chosen in the native Save dialog.
+/// Resolves with the path written, or `null` when the dialog was cancelled.
+/// The path comes from the dialog, never from the UI. The profile is
+/// validated before the dialog opens; no device access.
+#[tauri::command]
+pub async fn export_preset(
+    app: tauri::AppHandle,
+    backend: Shared<'_>,
+    name: String,
+) -> ApiResult<Option<String>> {
+    blocking(&backend, move |b| {
+        let json = b.export_preset_json(&name)?;
+        // Blocks this pool thread until the user answers; the plugin runs the
+        // dialog on the main thread.
+        let picked = app
+            .dialog()
+            .file()
+            .set_title("Export profile")
+            .set_file_name(format!("{name}.json"))
+            .add_filter("Profile (JSON)", &["json"])
+            .blocking_save_file();
+        let Some(picked) = picked else {
+            return Ok(None);
+        };
+        let path = picked
+            .into_path()
+            .map_err(|e| ApiError::new(ErrorCode::Storage, e.to_string()))?;
+        store::write_atomic(&path, json.as_bytes())?;
+        Ok(Some(path.display().to_string()))
+    })
+    .await
+}
+
+/// Save the profile file `text` (read by the UI) under `name`. Validated
+/// first; not applied.
+#[tauri::command]
+pub async fn import_preset(backend: Shared<'_>, text: String, name: String) -> ApiResult<AppState> {
+    blocking(&backend, move |b| b.import_preset(&text, &name)).await
+}
+
+/// Map an AutoEq / Equalizer APO text onto the 10 bands and pre-amp. Pure:
+/// nothing is written (the UI applies the result with `apply_eq_curve`).
+#[tauri::command]
+pub async fn import_eq(backend: Shared<'_>, text: String) -> ApiResult<EqImport> {
+    blocking(&backend, move |_| EqImport::parse(&text)).await
+}
+
+/// Profile to apply when the output becomes `output` (`null` clears the rule).
+#[tauri::command]
+pub async fn set_auto_switch(
+    backend: Shared<'_>,
+    output: Output,
+    profile: Option<String>,
+) -> ApiResult<AppState> {
+    blocking(&backend, move |b| b.set_auto_switch(output, profile)).await
+}
+
 // --- App -------------------------------------------------------------------
 
 /// Turn launch at login on or off (macOS Launch Agent via the autostart
@@ -247,6 +387,31 @@ pub async fn set_launch_at_login(
         let state = b.set_launch_at_login_flag(now);
         r.map_err(|e| ApiError::new(ErrorCode::Autostart, e.to_string()))?;
         Ok(state)
+    })
+    .await
+}
+
+/// Turn the global hotkeys on or off and set their accelerators (an empty
+/// string means that action's default). Validated and stored first (rejects
+/// `invalidValue`, `storage`), then registered with the OS; a shortcut that
+/// cannot be registered is reported in the snapshot's `hotkeys`, not as an error.
+#[tauri::command]
+pub async fn set_hotkeys(
+    app: tauri::AppHandle,
+    backend: Shared<'_>,
+    enabled: bool,
+    toggle_direct_mode: String,
+    next_profile: String,
+    toggle_sbx: String,
+) -> ApiResult<AppState> {
+    blocking(&backend, move |b| {
+        b.set_hotkeys(HotkeySettings {
+            enabled,
+            toggle_direct_mode,
+            next_profile,
+            toggle_sbx,
+        })?;
+        Ok(crate::shortcuts::apply(&app, b))
     })
     .await
 }

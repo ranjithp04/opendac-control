@@ -3,6 +3,7 @@
 //! See `docs/protocol-g6.md` §2 for the protocol reference.
 
 pub mod direct;
+pub mod eq_import;
 pub mod events;
 pub mod features;
 pub mod preset;

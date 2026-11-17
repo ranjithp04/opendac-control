@@ -5,7 +5,7 @@ mod common;
 
 use common::*;
 use g6_core::direct::{self, DirectMode};
-use g6_core::protocol::{Mask, Output};
+use g6_core::protocol::{Mask, MaskTarget, Output};
 use g6_core::transport::fake::FakeDevice;
 
 /// User state: EQ on, effects on, SBX on, Voice Clarity on.
@@ -241,9 +241,13 @@ fn only_effect_toggles_eq_and_the_two_mask_bits_are_ever_written() {
     // Untouched on the device.
     assert_eq!(get(&fake, "mic_clarity"), 1.0);
     assert_eq!(get(&fake, "mic_eq"), 1.0);
-    assert_eq!(get(&fake, "eq_preamp"), -2.5);
     assert_eq!(get(&fake, "decoder_mode"), 3.0);
     assert_eq!(fake.mask() & Mask::VOICE_CLARITY, Mask::VOICE_CLARITY);
+    // The pre-amp was never written (checked above); Scout is on again, so the
+    // device shows 0 dB and gives -2.5 back when Scout goes off.
+    assert_eq!(get(&fake, "eq_preamp"), 0.0);
+    dev.set_mask(MaskTarget::Scout, false).unwrap();
+    assert_eq!(get(&fake, "eq_preamp"), -2.5);
 }
 
 #[test]

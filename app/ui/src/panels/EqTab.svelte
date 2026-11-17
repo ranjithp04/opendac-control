@@ -1,10 +1,19 @@
 <script lang="ts">
   import { app } from '../lib/store.svelte';
+  import { MAX_EQ_IMPORT_BYTES } from '../lib/api';
   import { BAND_LABELS, db, outputName } from '../lib/format';
   import Toggle from '../components/Toggle.svelte';
   import VSlider from '../components/VSlider.svelte';
   import SliderRow from '../components/SliderRow.svelte';
-  import { BUILTIN_CURVES, CUSTOM_NAME, MAX_CURVE_NAME, matches, type NamedCurve } from '../lib/eqCurves';
+  import EqCurve from '../components/EqCurve.svelte';
+  import {
+    BUILTIN_CURVES,
+    CUSTOM_NAME,
+    MAX_CURVE_NAME,
+    matches,
+    suggestPreamp,
+    type NamedCurve,
+  } from '../lib/eqCurves';
 
   const st = $derived(app.state);
   const scout = $derived(st.scout && !st.directMode);
@@ -12,10 +21,12 @@
   const eqOn = $derived(scout || (st.eq.enabled && !st.directMode));
   // Gain being dragged per band (null when not dragging): label and curve follow the thumb.
   let liveBands = $state<(number | null)[]>(new Array(10).fill(null));
-  const bands = $derived(st.eq.bands.map((v, i) => liveBands[i] ?? v));
+  // Same for the points of the response curve; the sliders follow those too.
+  let curveBands = $state<(number | null)[]>(new Array(10).fill(null));
+  const bands = $derived(st.eq.bands.map((v, i) => liveBands[i] ?? curveBands[i] ?? v));
   const out = $derived(outputName(st.output));
   const caption = $derived(scout ? 'Scout curve (set by the device)' : eqOn ? `${out} EQ` : `${out} EQ · off`);
-  // Pre-amp being dragged (null when not dragging); not Scout-owned, so it stays editable in Scout.
+  // Pre-amp being dragged (null when not dragging). Scout does not lock it (the device shows 0 dB then).
   let livePreamp = $state<number | null>(null);
   const preamp = $derived(livePreamp ?? st.eq.preamp);
   const curves = $derived<NamedCurve[]>([...BUILTIN_CURVES, ...st.eqCurves]);
@@ -23,9 +34,40 @@
   // While Scout is on the bands are Scout's curve: no chip (not even Custom) is selected.
   const selected = $derived(scout ? null : curves.findIndex((c) => matches(c, { bands, preamp })));
 
+  const suggested = $derived(suggestPreamp(bands));
+
   let saving = $state(false);
   let curveName = $state('');
   const canSave = $derived(curveName.trim().length > 0 && !scout);
+
+  // Import from an AutoEq / Equalizer APO text file: the file is read here (webview file picker), mapped
+  // by import_eq (no device access), then written like any curve with apply_eq_curve.
+  let fileInput = $state<HTMLInputElement>();
+  let importNotes = $state<string[]>([]);
+  const canImport = $derived(!scout && !st.directMode);
+
+  async function pickFile(e: Event & { currentTarget: HTMLInputElement }) {
+    const file = e.currentTarget.files?.[0];
+    e.currentTarget.value = ''; // the same file can be chosen again
+    if (!file) return;
+    importNotes = [];
+    if (file.size > MAX_EQ_IMPORT_BYTES) {
+      app.notify({ code: 'invalidValue', message: `EQ text is larger than ${MAX_EQ_IMPORT_BYTES / 1024} KiB` });
+      return;
+    }
+    let text: string;
+    try {
+      text = await file.text();
+    } catch {
+      app.notify({ code: 'storage', message: `Could not read ${file.name}.` });
+      return;
+    }
+    const eq = await app.run('import_eq', { text });
+    if (!eq) return;
+    if (await app.run('apply_eq_curve', { bands: eq.bands, preamp: eq.preamp })) {
+      importNotes = [`Imported ${file.name}.`, ...eq.notes];
+    }
+  }
 
   function focusOnMount(node: HTMLElement) {
     node.focus();
@@ -99,12 +141,21 @@
       <span>{caption}</span>
       <span class="mono">±12 dB</span>
     </div>
+    <EqCurve
+      {bands}
+      disabled={scout}
+      bind:live={curveBands}
+      oncommit={(band, gain) => app.run('set_eq_band', { band, gain })}
+    />
+    <div class="cap curvecap">
+      <span>Approximate response: the G6's real filter shapes are not documented</span>
+    </div>
     <div class="bands">
       {#each BAND_LABELS as l, i (l)}
         <div class="band">
           <span class="v">{db(bands[i])}</span>
           <VSlider
-            value={st.eq.bands[i]}
+            value={curveBands[i] ?? st.eq.bands[i]}
             min={-12}
             max={12}
             step={0.5}
@@ -131,47 +182,79 @@
         disabled={st.directMode}
         oncommit={(v) => app.run('set_eq_preamp', { db: v })}
       />
+      {#if saving}
+        <form onsubmit={save}>
+          <input
+            type="text"
+            class="name"
+            aria-label="Curve name"
+            placeholder="Curve name"
+            maxlength={MAX_CURVE_NAME}
+            autocomplete="off"
+            spellcheck="false"
+            bind:value={curveName}
+            use:focusOnMount
+            onkeydown={(e) => e.key === 'Escape' && (saving = false)}
+          />
+          <button type="submit" class="btn primary" disabled={!canSave}>Save</button>
+          <button type="button" class="btn" onclick={() => (saving = false)}>Cancel</button>
+        </form>
+      {:else}
+        <div class="row">
+          <button
+            type="button"
+            class="btn"
+            disabled={st.directMode || scout || suggested === preamp}
+            title="Set the pre-amp to cancel the largest band boost ({db(suggested)} dB)"
+            onclick={() => app.run('set_eq_preamp', { db: suggested })}
+          >
+            Suggest pre-amp
+          </button>
+          <!-- Only a curve that matches no chip (Custom) is new enough to save. -->
+          <button
+            type="button"
+            class="btn"
+            disabled={selected !== -1}
+            title={selected === -1 ? undefined : 'Change the EQ first: this curve is already a chip'}
+            onclick={openSave}>Save curve…</button
+          >
+          <button
+            type="button"
+            class="btn"
+            disabled={!canImport}
+            title="Load an AutoEq / Equalizer APO text file (Preamp, Filter and GraphicEQ lines)"
+            onclick={() => fileInput?.click()}>Import EQ…</button
+          >
+        </div>
+      {/if}
+      <input
+        bind:this={fileInput}
+        type="file"
+        accept=".txt,text/plain"
+        hidden
+        aria-label="EQ text file"
+        onchange={pickFile}
+      />
     </div>
   </div>
 
-  <div class="save">
-    {#if saving}
-      <form onsubmit={save}>
-        <input
-          type="text"
-          class="name"
-          aria-label="Curve name"
-          placeholder="Curve name"
-          maxlength={MAX_CURVE_NAME}
-          autocomplete="off"
-          spellcheck="false"
-          bind:value={curveName}
-          use:focusOnMount
-          onkeydown={(e) => e.key === 'Escape' && (saving = false)}
-        />
-        <button type="submit" class="btn primary" disabled={!canSave}>Save</button>
-        <button type="button" class="btn" onclick={() => (saving = false)}>Cancel</button>
-      </form>
-    {:else}
-      <!-- Only a curve that matches no chip (Custom) is new enough to save. -->
-      <button
-        type="button"
-        class="btn"
-        disabled={selected !== -1}
-        title={selected === -1 ? undefined : 'Change the EQ first: this curve is already a chip'}
-        onclick={openSave}>Save curve…</button
-      >
-    {/if}
-  </div>
+  {#if importNotes.length}
+    <div class="notes" role="status">
+      <ul>
+        {#each importNotes as n, i (i)}
+          <li>{n}</li>
+        {/each}
+      </ul>
+      <button type="button" class="close" aria-label="Dismiss notes" onclick={() => (importNotes = [])}>×</button>
+    </div>
+  {/if}
 </div>
 
 <style>
   .tab {
     display: flex;
     flex-direction: column;
-    gap: 16px;
-    /* WebKit drops the scroll container's bottom padding: keep the save form off the footer. */
-    padding-bottom: 16px;
+    gap: 10px;
   }
   .top {
     display: flex;
@@ -248,6 +331,9 @@
     flex-wrap: wrap;
     gap: 6px;
     padding: 0 6px 4px;
+    /* Many saved curves scroll here instead of pushing the sliders down. */
+    max-height: 62px;
+    overflow-y: auto;
   }
   .chipwrap {
     display: inline-flex;
@@ -304,12 +390,54 @@
     border-color: var(--acc);
     background: var(--border-2);
   }
+  .curvecap {
+    font-size: 10px;
+    color: var(--text-2);
+  }
   .preamp {
     padding: 8px 6px 2px;
-  }
-  .save form {
     display: flex;
+    flex-direction: column;
     gap: 8px;
+  }
+  .preamp form,
+  .row {
+    display: flex;
+    gap: 6px;
+  }
+  .row .btn {
+    flex: 1;
+    height: 28px;
+    padding: 0 6px;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .notes {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border-2);
+    font-size: 11px;
+    color: var(--text-2);
+  }
+  .notes ul {
+    margin: 0;
+    padding-left: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .close {
+    border: none;
+    background: transparent;
+    color: var(--text-2);
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 2px;
+    cursor: pointer;
   }
   .name {
     flex: 1;

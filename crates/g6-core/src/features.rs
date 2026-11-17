@@ -259,6 +259,17 @@ pub fn scout_owned(feature: &Feature) -> bool {
             || (EQ_FIRST_ID..EQ_FIRST_ID + EQ_BANDS.len() as u8).contains(&feature.id))
 }
 
+/// Playback features whose value Scout Mode replaces when it is turned on and
+/// restores when it is turned off: [`scout_owned`] plus the EQ pre-amp, which
+/// the G6 sets to 0 dB (`docs/protocol-g6.md` §1). The pre-amp is not locked
+/// while Scout is on (`scout_owned` is the "locked" set), but while Scout is
+/// on its value is Scout's: it is re-read after a Scout change and left out of
+/// profiles and re-applies, since a value written while Scout is on becomes
+/// the one the device keeps after Scout turns off (verified, §3 item 9).
+pub fn scout_resets(feature: &Feature) -> bool {
+    scout_owned(feature) || (feature.family == FAMILY_PLAYBACK && feature.name == "eq_preamp")
+}
+
 /// Parse an EQ band name (`31`, `62`, `125`, `250`, `500`, `1k`, `2k`, `4k`,
 /// `8k`, `16k`; case-insensitive, optional `hz` suffix, `1000` == `1k`) into a
 /// band index `0..10`.
@@ -396,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn table_covers_plan_7_3() {
+    fn table_covers_protocol_doc_2_3() {
         let ids: &[(u8, &[u8])] = &[
             (
                 0x96,
@@ -449,7 +460,20 @@ mod tests {
             Err(FeatureError::OutOfRange { .. })
         ));
         assert!(!scout_owned(p));
+        assert!(scout_resets(p));
         assert!(FEATURES.iter().all(|f| f.exposed));
+    }
+
+    #[test]
+    fn scout_resets_is_scout_owned_plus_the_pre_amp() {
+        for f in FEATURES {
+            assert_eq!(
+                scout_resets(f),
+                scout_owned(f) || f.name == "eq_preamp",
+                "{}",
+                f.name
+            );
+        }
     }
 
     #[test]

@@ -4,9 +4,9 @@ use std::fmt::Write as _;
 
 use g6_core::events::{Change, Event};
 use g6_core::features::{self, Feature, Kind, EQ_BANDS, EQ_FIRST_ID, FAMILY_PLAYBACK, FEATURES};
-use g6_core::protocol::{Mask, MicBoost, Output};
+use g6_core::protocol::{rgb_to_hex, Mask, MicBoost, Output};
 use g6_core::state::{output_name, DeviceState, Profile};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// A feature value as the user sees it (`on`, `0.50`, `-1 dB`, `night`).
 /// `device` is the device-side value.
@@ -70,7 +70,61 @@ pub fn event_line(e: &Event) -> String {
         Event::Changed(Change::Mask(m)) => format!("mask: {}", mask_display(*m)),
         Event::Changed(Change::DacFilter(x)) => format!("filter: {}", x.name()),
         Event::Changed(Change::MicBoost(x)) => format!("mic boost: {}", boost_display(*x)),
+        Event::Changed(Change::LightingEnabled(x)) => format!("light: {}", on_off(*x)),
+        Event::Changed(Change::LightingColor(x)) => format!("light color: {}", rgb_to_hex(*x)),
     }
+}
+
+/// One event as a JSON object for `watch --json` and the API's event stream.
+/// `ts` is seconds since the Unix epoch. Keys per `event`:
+/// `connected` / `disconnected` (none), `output` (`output`), `feature`
+/// (`name`, `value`, `text`), `mask` (`sbx`, `scout`, `voice_clarity`),
+/// `filter` (`filter`), `mic_boost` (`db`), `light` (`on`), `light_color`
+/// (`color`). Feature values use the same scale as `status --json`.
+pub fn event_json(e: &Event, ts: f64) -> Value {
+    let ts = (ts * 1000.0).round() / 1000.0;
+    match e {
+        Event::Connected => json!({"ts": ts, "event": "connected"}),
+        Event::Disconnected => json!({"ts": ts, "event": "disconnected"}),
+        Event::OutputSwitched(o) => json!({"ts": ts, "event": "output", "output": output_name(*o)}),
+        Event::Changed(Change::Feature { feature, value }) => json!({
+            "ts": ts,
+            "event": "feature",
+            "name": feature.name,
+            "value": round_ui(f64::from(*value), feature.ui_scale),
+            "text": feature_display(feature, *value),
+        }),
+        Event::Changed(Change::Mask(m)) => json!({
+            "ts": ts,
+            "event": "mask",
+            "sbx": m.sbx(),
+            "scout": m.scout(),
+            "voice_clarity": m.voice_clarity(),
+        }),
+        Event::Changed(Change::DacFilter(x)) => {
+            json!({"ts": ts, "event": "filter", "filter": x.name()})
+        }
+        Event::Changed(Change::MicBoost(x)) => {
+            json!({"ts": ts, "event": "mic_boost", "db": x.db()})
+        }
+        Event::Changed(Change::LightingEnabled(x)) => json!({"ts": ts, "event": "light", "on": x}),
+        Event::Changed(Change::LightingColor(x)) => {
+            json!({"ts": ts, "event": "light_color", "color": rgb_to_hex(*x)})
+        }
+    }
+}
+
+/// Seconds since the Unix epoch (0 if the clock is before it).
+pub fn unix_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64())
+}
+
+/// A device value on the UI scale, with the f32 -> f64 noise rounded away
+/// (every step is a multiple of 0.01).
+fn round_ui(device: f64, ui_scale: f32) -> f64 {
+    (device * f64::from(ui_scale) * 100.0).round() / 100.0
 }
 
 /// Human-readable status.
@@ -109,6 +163,16 @@ pub fn status_text(state: &DeviceState, direct_mode: bool) -> String {
     row(
         "mic boost",
         state.mic_boost.map_or("unknown".into(), boost_display),
+    );
+    row(
+        "light",
+        state
+            .lighting_enabled
+            .map_or("unknown".into(), |on| on_off(on).into()),
+    );
+    row(
+        "light color",
+        state.lighting_color.map_or("unknown".into(), rgb_to_hex),
     );
     for f in FEATURES.iter().filter(|f| !features::per_output(f)) {
         if let Some(v) = state.common.get(f) {
@@ -176,12 +240,11 @@ pub fn status_json(state: &DeviceState, direct_mode: bool) -> Result<String, ser
             for f in FEATURES.iter().filter(|f| !f.exposed) {
                 profile.remove(f.name);
             }
-            // Values are f32 on the device; round away the f32 -> f64 noise
-            // (every step is a multiple of 0.01). Mic NR is shown 0..1.
+            // Values are f32 on the device. Mic NR is shown 0..1.
             for (name, value) in profile.iter_mut() {
                 if let Some(dev) = value.as_f64() {
-                    let scale = features::by_name(name).map_or(1.0, |f| f64::from(f.ui_scale));
-                    *value = Value::from((dev * scale * 100.0).round() / 100.0);
+                    let scale = features::by_name(name).map_or(1.0, |f| f.ui_scale);
+                    *value = Value::from(round_ui(dev, scale));
                 }
             }
         }
@@ -194,6 +257,7 @@ pub fn status_json(state: &DeviceState, direct_mode: bool) -> Result<String, ser
 mod tests {
     use super::*;
     use g6_core::features::by_name;
+    use g6_core::protocol::DacFilter;
 
     fn f(name: &str) -> &'static Feature {
         by_name(name).unwrap()
@@ -224,6 +288,90 @@ mod tests {
             event_line(&Event::Changed(Change::Mask(Mask(0x05)))),
             "mask: sbx on, scout off, voice clarity on"
         );
+        assert_eq!(
+            event_line(&Event::Changed(Change::LightingEnabled(false))),
+            "light: off"
+        );
+        assert_eq!(
+            event_line(&Event::Changed(Change::LightingColor([255, 128, 0]))),
+            "light color: ff8000"
+        );
+    }
+
+    #[test]
+    fn event_json_has_stable_keys_for_every_event() {
+        let ts = 12.3456;
+        let j = |e: Event| event_json(&e, ts);
+        assert_eq!(
+            j(Event::Connected),
+            json!({"ts": 12.346, "event": "connected"})
+        );
+        assert_eq!(
+            j(Event::Disconnected),
+            json!({"ts": 12.346, "event": "disconnected"})
+        );
+        assert_eq!(
+            j(Event::OutputSwitched(Output::Speakers)),
+            json!({"ts": 12.346, "event": "output", "output": "speakers"})
+        );
+        assert_eq!(
+            j(Event::Changed(Change::Feature {
+                feature: f("eq_1k"),
+                value: -1.5
+            })),
+            json!({"ts": 12.346, "event": "feature", "name": "eq_1k", "value": -1.5, "text": "-1.5 dB"})
+        );
+        // Mic NR: device 0.25 is shown 0.5, as in `status --json`.
+        assert_eq!(
+            j(Event::Changed(Change::Feature {
+                feature: f("mic_nr_level"),
+                value: 0.25
+            })),
+            json!({"ts": 12.346, "event": "feature", "name": "mic_nr_level", "value": 0.5, "text": "0.50"})
+        );
+        assert_eq!(
+            j(Event::Changed(Change::Feature {
+                feature: f("decoder_mode"),
+                value: 3.0
+            })),
+            json!({"ts": 12.346, "event": "feature", "name": "decoder_mode", "value": 3.0, "text": "night"})
+        );
+        assert_eq!(
+            j(Event::Changed(Change::Mask(Mask(0x05)))),
+            json!({"ts": 12.346, "event": "mask", "sbx": true, "scout": false, "voice_clarity": true})
+        );
+        assert_eq!(
+            j(Event::Changed(Change::DacFilter(DacFilter::Nos))),
+            json!({"ts": 12.346, "event": "filter", "filter": "nos"})
+        );
+        assert_eq!(
+            j(Event::Changed(Change::MicBoost(MicBoost::Db20))),
+            json!({"ts": 12.346, "event": "mic_boost", "db": 20})
+        );
+        assert_eq!(
+            j(Event::Changed(Change::LightingEnabled(false))),
+            json!({"ts": 12.346, "event": "light", "on": false})
+        );
+        assert_eq!(
+            j(Event::Changed(Change::LightingColor([255, 128, 0]))),
+            json!({"ts": 12.346, "event": "light_color", "color": "ff8000"})
+        );
+    }
+
+    #[test]
+    fn status_shows_the_light() {
+        let mut st = DeviceState::new();
+        let t = status_text(&st, false);
+        assert!(t.contains("light               unknown"), "{t}");
+        assert!(t.contains("light color         unknown"), "{t}");
+        st.lighting_enabled = Some(true);
+        st.lighting_color = Some([0, 255, 0]);
+        let t = status_text(&st, false);
+        assert!(t.contains("light               on"), "{t}");
+        assert!(t.contains("light color         00ff00"), "{t}");
+        let v: Value = serde_json::from_str(&status_json(&st, false).unwrap()).unwrap();
+        assert_eq!(v["lighting_enabled"], true);
+        assert_eq!(v["lighting_color"], "00ff00");
     }
 
     #[test]

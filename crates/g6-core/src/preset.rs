@@ -23,6 +23,9 @@ use crate::protocol::{MaskTarget, Output};
 use crate::state::{output_name, DeviceState};
 use crate::store::{self, Paths, StoreError};
 
+/// Largest profile file accepted on import (a real one is under 2 KiB).
+pub const MAX_FILE_BYTES: usize = 256 * 1024;
+
 /// Settings for one output.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PresetProfile {
@@ -119,11 +122,43 @@ impl Preset {
         Ok(())
     }
 
+    /// The profile file: pretty JSON, the same format as the stored
+    /// `NAME.json`. Validated first, so a file written here imports again.
+    pub fn to_json(&self) -> Result<String, Error> {
+        self.validate()?;
+        serde_json::to_string_pretty(self)
+            .map(|s| s + "\n")
+            .map_err(|e| Error::Invalid(e.to_string()))
+    }
+
+    /// Parse a profile file and validate it against the feature table
+    /// (allow-listed per-output features, range checks). Nothing reaches the
+    /// device or the disk here; the caller saves the result.
+    pub fn from_json(text: &str) -> Result<Preset, Error> {
+        if text.len() > MAX_FILE_BYTES {
+            return Err(Error::Invalid(format!(
+                "profile file is larger than {} KiB",
+                MAX_FILE_BYTES / 1024
+            )));
+        }
+        let preset: Preset = serde_json::from_str(text)
+            .map_err(|e| Error::Invalid(format!("not a profile file: {e}")))?;
+        if preset.headphones.is_none() && preset.speakers.is_none() {
+            return Err(Error::Invalid(
+                "the file has no 'headphones' or 'speakers' profile".into(),
+            ));
+        }
+        preset.validate()?;
+        Ok(preset)
+    }
+
     /// Snapshot of `state`: both profiles that are known, each with the
     /// exposed playback features; the SBX / Scout mask goes into the active
     /// output's profile (the mask is global, the inactive profile has none).
     /// While Scout is on, the active profile leaves out the features Scout
-    /// sets itself ([`features::scout_owned`]): their values are Scout's.
+    /// replaces ([`features::scout_resets`]): their values are Scout's. An
+    /// output left while Scout was on has none of them either
+    /// ([`DeviceState::apply`] drops them on the switch).
     pub fn capture(state: &DeviceState) -> Preset {
         let profile = |output: Output| {
             let src = state.profile(output);
@@ -133,7 +168,7 @@ impl Preset {
             let scout = state.output == Some(output) && state.mask.is_some_and(|m| m.scout());
             let mut p = PresetProfile::default();
             for f in FEATURES.iter().filter(|f| {
-                f.family == FAMILY_PLAYBACK && f.exposed && !(scout && features::scout_owned(f))
+                f.family == FAMILY_PLAYBACK && f.exposed && !(scout && features::scout_resets(f))
             }) {
                 if let Some(v) = src.get(f) {
                     p.features.insert(f.name.to_string(), v);
@@ -165,9 +200,10 @@ pub struct Applied {
 /// Apply the profile for the active output. The whole preset is validated
 /// first; nothing is sent if it is invalid. Order: Scout off, SBX, features
 /// in table order, Scout on last (turning Scout on makes the device apply
-/// its own EQ curve). With `scout: true` the features Scout sets itself
-/// ([`features::scout_owned`]: EQ, Smart Volume) are not written, so the
-/// device keeps the user's EQ to restore when Scout is turned off. A device
+/// its own EQ curve). With `scout: true` neither SBX nor the features Scout
+/// replaces ([`features::scout_resets`]: EQ, Smart Volume, pre-amp) are
+/// written, so the device keeps the user's values to restore when Scout is
+/// turned off. A device
 /// error stops the apply part-way; the writes done so far stay applied.
 pub fn apply(dev: &Device, preset: &Preset) -> Result<Applied, Error> {
     preset.validate()?;
@@ -180,19 +216,22 @@ pub fn apply(dev: &Device, preset: &Preset) -> Result<Applied, Error> {
         dev.set_mask(MaskTarget::Scout, false)?;
         writes += 1;
     }
-    if let Some(want) = profile.sbx {
+    // Not with Scout on afterwards: Scout switches SBX off itself and the
+    // device restores the SBX state from before when Scout goes off. A
+    // profile captured under Scout always says SBX off (the mask hides it).
+    if let Some(want) = profile.sbx.filter(|_| profile.scout != Some(true)) {
         if dev.read_mask()?.sbx() != want {
             dev.set_mask(MaskTarget::Sbx, want)?;
             writes += 1;
         }
     }
-    // Scout-owned features are skipped whenever Scout will be on afterwards,
+    // Scout-replaced features are skipped whenever Scout will be on afterwards,
     // also for a profile that says nothing about Scout (the inactive output's
     // profile from `Preset::capture`) while the device has it on.
     let scout = profile.scout.unwrap_or(mask.scout());
     for f in FEATURES
         .iter()
-        .filter(|f| !(scout && features::scout_owned(f)))
+        .filter(|f| !(scout && features::scout_resets(f)))
     {
         if let Some(&v) = profile.features.get(f.name) {
             dev.write_feature(f, v)?;
@@ -536,11 +575,18 @@ mod tests {
     fn scout_on_preset_does_not_write_what_scout_sets_itself() {
         let fake = FakeDevice::new();
         let (dev, _rx) = start(&fake);
-        // The user's own EQ, Scout off.
+        // The user's own EQ and pre-amp, Scout off.
         dev.write_feature(features::by_name("eq_1k").unwrap(), 5.0)
             .unwrap();
+        dev.write_feature(features::by_name("eq_preamp").unwrap(), -5.5)
+            .unwrap();
         let curve = crate::transport::fake::SCOUT_CURVE;
-        let mut p = profile(&[("eq", 1.0), ("smartvol", 1.0), ("bass", 1.0)]);
+        let mut p = profile(&[
+            ("eq", 1.0),
+            ("smartvol", 1.0),
+            ("bass", 1.0),
+            ("eq_preamp", 0.0),
+        ]);
         for (i, v) in curve.iter().enumerate() {
             p.features
                 .insert(features::eq_band(i).unwrap().name.to_string(), *v);
@@ -561,6 +607,7 @@ mod tests {
         assert_eq!(get(&fake, "eq_1k"), 5.0);
         assert_eq!(get(&fake, "eq"), 0.0);
         assert_eq!(get(&fake, "smartvol"), 0.0);
+        assert_eq!(get(&fake, "eq_preamp"), -5.5, "pre-amp not written");
     }
 
     #[test]
@@ -575,7 +622,14 @@ mod tests {
         let h = Preset::capture(&state).headphones.unwrap();
         assert_eq!(h.scout, Some(true));
         assert_eq!(h.features.get("bass"), Some(&1.0));
-        for name in ["eq", "eq_31", "eq_16k", "smartvol", "smartvol_level"] {
+        for name in [
+            "eq",
+            "eq_31",
+            "eq_16k",
+            "eq_preamp",
+            "smartvol",
+            "smartvol_level",
+        ] {
             assert!(!h.features.contains_key(name), "{name} captured");
         }
     }
@@ -629,5 +683,40 @@ mod tests {
         let s = PresetStore::from_paths(&Paths::under(t.path()));
         s.save_current("mine", &state).unwrap();
         assert_eq!(s.load("mine").unwrap(), captured);
+    }
+
+    #[test]
+    fn profile_file_round_trips_and_is_validated_on_import() {
+        let p = Preset {
+            headphones: Some(PresetProfile {
+                sbx: Some(true),
+                ..profile(&[("eq", 1.0), ("eq_1k", -2.5), ("eq_preamp", -3.0)])
+            }),
+            speakers: Some(profile(&[("bass", 1.0), ("bass_level", 0.4)])),
+        };
+        let text = p.to_json().unwrap();
+        assert!(text.ends_with("}\n"));
+        assert_eq!(Preset::from_json(&text).unwrap(), p);
+
+        let invalid = |t: &str| match Preset::from_json(t) {
+            Err(Error::Invalid(m)) => m,
+            other => panic!("{t}: {other:?}"),
+        };
+        // Out of range, unknown feature, mic feature (not a playback one), wrong type.
+        assert!(invalid(r#"{"headphones":{"eq_31":99}}"#).contains("eq_31"));
+        assert!(invalid(r#"{"headphones":{"eq_preamp":7}}"#).contains("eq_preamp"));
+        assert!(invalid(r#"{"speakers":{"nope":1}}"#).contains("nope"));
+        assert!(invalid(r#"{"speakers":{"mic_aec":1}}"#).contains("mic_aec"));
+        assert!(invalid(r#"{"headphones":{"eq_31":"loud"}}"#).contains("not a profile file"));
+        assert!(invalid("[1,2]").contains("not a profile file"));
+        assert!(invalid("not json").contains("not a profile file"));
+        assert!(invalid("{}").contains("no 'headphones' or 'speakers'"));
+        assert!(invalid(&" ".repeat(MAX_FILE_BYTES + 1)).contains("larger than"));
+        // An invalid preset is not exported either.
+        let bad = Preset {
+            headphones: Some(profile(&[("eq_31", 99.0)])),
+            speakers: None,
+        };
+        assert!(matches!(bad.to_json(), Err(Error::Invalid(_))));
     }
 }

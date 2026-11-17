@@ -3,7 +3,7 @@
 //! The G6 keeps separate playback settings (family `0x96`: EQ, SBX effects)
 //! for headphones and speakers; the active one follows the headphone jack.
 //! [`DeviceState`] holds both profiles, the settings that do not depend on
-//! the output (mic, decoder, DAC filter, mic boost, SBX / Scout mask) and is
+//! the output (mic, decoder, DAC filter, mic boost, LED, SBX / Scout mask) and is
 //! kept current by feeding it [`Event`]s or by [`DeviceState::refresh`].
 //!
 //! Only the active output's profile can be read from the device; the other
@@ -17,7 +17,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::events::{Change, Device, Error, Event};
 use crate::features::{self, Feature, FEATURES};
-use crate::protocol::{DacFilter, Mask, MicBoost, Output};
+use crate::protocol::{rgb_from_hex, rgb_to_hex, DacFilter, Mask, MicBoost, Output, Rgb};
 
 /// Stable name of an output (`headphones` / `speakers`), used in JSON.
 pub fn output_name(o: Output) -> &'static str {
@@ -110,6 +110,9 @@ opt_serde!(
     |b| b.db(),
     |d| MicBoost::from_db(*d)
 );
+opt_serde!(color_serde, Rgb, String, |c| rgb_to_hex(c), |s| {
+    rgb_from_hex(s)
+});
 
 /// Full snapshot of the G6.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -134,6 +137,11 @@ pub struct DeviceState {
     pub dac_filter: Option<DacFilter>,
     #[serde(with = "boost_serde")]
     pub mic_boost: Option<MicBoost>,
+    /// LED on / off.
+    pub lighting_enabled: Option<bool>,
+    /// LED color (`"rrggbb"` in JSON).
+    #[serde(with = "color_serde")]
+    pub lighting_color: Option<Rgb>,
 }
 
 impl DeviceState {
@@ -191,23 +199,44 @@ impl DeviceState {
         }
     }
 
+    /// The active output is about to become `new`. Left while Scout is on,
+    /// the old output's EQ / Smart Volume / pre-amp are Scout's, not the
+    /// user's: forget them so they are never captured into a profile or
+    /// re-applied as the user's. Call before `output` and `mask` are updated.
+    fn leave_output(&mut self, new: Output) {
+        if let Some(old) = self.output.filter(|old| *old != new) {
+            if self.mask.is_some_and(|m| m.scout()) {
+                self.profile_mut(old)
+                    .0
+                    .retain(|k, _| !features::by_name(k).is_some_and(features::scout_resets));
+            }
+        }
+    }
+
     /// Update from a device event. Returns whether anything changed.
     pub fn apply(&mut self, event: &Event) -> bool {
         match *event {
             Event::Connected => replace(&mut self.connected, true),
             Event::Disconnected => replace(&mut self.connected, false),
-            Event::OutputSwitched(o) => replace(&mut self.output, Some(o)),
+            Event::OutputSwitched(o) => {
+                self.leave_output(o);
+                replace(&mut self.output, Some(o))
+            }
             Event::Changed(Change::Feature { feature, value }) => self.set_feature(feature, value),
             Event::Changed(Change::Mask(m)) => replace(&mut self.mask, Some(m)),
             Event::Changed(Change::DacFilter(x)) => replace(&mut self.dac_filter, Some(x)),
             Event::Changed(Change::MicBoost(x)) => replace(&mut self.mic_boost, Some(x)),
+            Event::Changed(Change::LightingEnabled(x)) => {
+                replace(&mut self.lighting_enabled, Some(x))
+            }
+            Event::Changed(Change::LightingColor(x)) => replace(&mut self.lighting_color, Some(x)),
         }
     }
 
     /// Read the whole state from the device: output, mask, DAC filter, mic
-    /// boost and every feature in the table. Only the active output's
+    /// boost, LED and every feature in the table. Only the active output's
     /// profile is read, the other keeps its last known values. A mask, DAC
-    /// filter, mic boost or feature read that does not answer is skipped (and
+    /// filter, mic boost, LED or feature read that does not answer is skipped (and
     /// logged; the field keeps its value); an output read that does not
     /// answer and a lost device are errors.
     pub fn refresh(&mut self, dev: &Device) -> Result<(), Error> {
@@ -217,6 +246,10 @@ impl DeviceState {
                 Ok(v) => Ok(Some(v)),
                 Err(Error::Timeout { .. }) => {
                     log::warn!("no reply reading {what}");
+                    Ok(None)
+                }
+                Err(Error::Rejected { status, .. }) => {
+                    log::warn!("{what} read rejected (status {status:#04x})");
                     Ok(None)
                 }
                 Err(e) => Err(e),
@@ -229,6 +262,9 @@ impl DeviceState {
         for attempt in 0..3 {
             let mut read = self.clone();
             let output = dev.read_output()?;
+            // An output change found here (e.g. after a reconnect) has no
+            // `OutputSwitched` event to forget the old output's Scout values.
+            read.leave_output(output);
             read.output = Some(output);
             if let Some(m) = soft("mask", dev.read_mask())? {
                 read.mask = Some(m);
@@ -238,6 +274,12 @@ impl DeviceState {
             }
             if let Some(x) = soft("mic boost", dev.read_mic_boost())? {
                 read.mic_boost = Some(x);
+            }
+            if let Some(x) = soft("lighting", dev.read_lighting_enabled())? {
+                read.lighting_enabled = Some(x);
+            }
+            if let Some(x) = soft("lighting color", dev.read_lighting_color())? {
+                read.lighting_color = Some(x);
             }
             for f in FEATURES {
                 if let Some(v) = soft(f.name, dev.read_feature(f))? {
@@ -325,6 +367,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn leaving_an_output_under_scout_forgets_its_scout_values() {
+        let mut s = DeviceState::new();
+        s.apply(&Event::OutputSwitched(Output::Headphones));
+        s.apply(&Event::Changed(Change::Mask(Mask(Mask::SCOUT))));
+        // Read under Scout: Scout's values.
+        s.apply(&changed("eq", 1.0));
+        s.apply(&changed("eq_31", 2.0));
+        s.apply(&changed("smartvol_level", 0.9));
+        s.apply(&changed("eq_preamp", 0.0));
+        s.apply(&changed("bass", 1.0));
+        s.apply(&Event::OutputSwitched(Output::Speakers));
+        for name in ["eq", "eq_31", "smartvol_level", "eq_preamp"] {
+            assert_eq!(s.headphones.get(feat(name)), None, "{name} kept");
+        }
+        assert_eq!(s.headphones.get(feat("bass")), Some(1.0));
+        // Neither a profile nor a re-apply picks them up.
+        let p = crate::preset::Preset::capture(&s);
+        let h = p.headphones.unwrap();
+        assert!(!h.features.contains_key("eq_31"));
+        assert_eq!(h.features.get("bass"), Some(&1.0));
+
+        // Without Scout the inactive profile is kept whole.
+        s.apply(&Event::Changed(Change::Mask(Mask(0))));
+        s.apply(&changed("eq_31", -1.0));
+        s.apply(&Event::OutputSwitched(Output::Headphones));
+        assert_eq!(s.speakers.get(feat("eq_31")), Some(-1.0));
+    }
+
+    #[test]
     fn decoder_is_shared() {
         let mut s = DeviceState::new();
         s.apply(&Event::OutputSwitched(Output::Headphones));
@@ -348,6 +419,11 @@ pub(crate) mod tests {
         assert!(s.apply(&Event::Changed(Change::Mask(Mask(0x05)))));
         assert!(s.apply(&Event::Changed(Change::DacFilter(DacFilter::Nos))));
         assert!(s.apply(&Event::Changed(Change::MicBoost(MicBoost::Db10))));
+        assert!(s.apply(&Event::Changed(Change::LightingEnabled(false))));
+        assert!(!s.apply(&Event::Changed(Change::LightingEnabled(false))));
+        assert!(s.apply(&Event::Changed(Change::LightingColor([1, 2, 3]))));
+        assert_eq!(s.lighting_enabled, Some(false));
+        assert_eq!(s.lighting_color, Some([1, 2, 3]));
         assert!(s.mask.unwrap().sbx() && !s.mask.unwrap().scout());
         assert_eq!(s.dac_filter, Some(DacFilter::Nos));
         assert_eq!(s.mic_boost, Some(MicBoost::Db10));
@@ -371,6 +447,8 @@ pub(crate) mod tests {
         assert_eq!(s.mask, Some(Mask(0x01)));
         assert_eq!(s.dac_filter, Some(DacFilter::FastMin));
         assert_eq!(s.mic_boost, Some(MicBoost::Db30));
+        assert_eq!(s.lighting_enabled, Some(true));
+        assert_eq!(s.lighting_color, Some([255, 0, 0]));
         assert_eq!(s.speakers.get(feat("surround")), Some(1.0));
         assert_eq!(s.speakers.eq_bands()[5], Some(-1.5));
         assert_eq!(s.speakers.get(feat("mic_nr_level")), Some(0.25));
@@ -398,6 +476,39 @@ pub(crate) mod tests {
         s.apply(&Event::OutputSwitched(Output::Headphones));
         assert_eq!(s.feature(feat("mic_eq")), Some(1.0));
         assert_eq!(s.feature(feat("decoder_mode")), Some(2.0));
+    }
+
+    #[test]
+    fn refresh_finding_a_new_output_under_scout_forgets_the_old_scout_values() {
+        let fake = FakeDevice::new();
+        fake.switch_output(Output::Speakers);
+        let (dev, _rx) = start(&fake);
+        // Last known: headphones with Scout on (Scout's values), as after a
+        // reconnect where the jack switched meanwhile.
+        let mut s = DeviceState::new();
+        s.apply(&Event::OutputSwitched(Output::Headphones));
+        s.apply(&Event::Changed(Change::Mask(Mask(Mask::SCOUT))));
+        for (name, v) in [
+            ("eq", 1.0),
+            ("eq_31", 2.0),
+            ("eq_preamp", 0.0),
+            ("bass", 1.0),
+        ] {
+            s.apply(&changed(name, v));
+        }
+        s.refresh(&dev).unwrap();
+        assert_eq!(s.output, Some(Output::Speakers));
+        for name in ["eq", "eq_31", "eq_preamp"] {
+            assert_eq!(s.headphones.get(feat(name)), None, "{name} kept");
+        }
+        assert_eq!(s.headphones.get(feat("bass")), Some(1.0));
+
+        // Without Scout the old output's profile is kept whole.
+        let mut s = DeviceState::new();
+        s.apply(&Event::OutputSwitched(Output::Headphones));
+        s.apply(&changed("eq_31", 2.0));
+        s.refresh(&dev).unwrap();
+        assert_eq!(s.headphones.get(feat("eq_31")), Some(2.0));
     }
 
     #[test]
@@ -455,14 +566,23 @@ pub(crate) mod tests {
         s.apply(&Event::Changed(Change::Mask(Mask(3))));
         s.apply(&Event::Changed(Change::DacFilter(DacFilter::SlowLin)));
         s.apply(&Event::Changed(Change::MicBoost(MicBoost::Db20)));
+        s.apply(&Event::Changed(Change::LightingEnabled(true)));
+        s.apply(&Event::Changed(Change::LightingColor([0, 255, 0])));
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("\"output\":\"speakers\""));
         assert!(json.contains("\"dac_filter\":\"slow-lin\""));
+        assert!(json.contains("\"lighting_enabled\":true"));
+        assert!(json.contains("\"lighting_color\":\"00ff00\""));
         let back: DeviceState = serde_json::from_str(&json).unwrap();
         assert_eq!(back, s);
         // Old / partial files still load.
         let partial: DeviceState = serde_json::from_str("{\"output\":\"headphones\"}").unwrap();
         assert_eq!(partial.output, Some(Output::Headphones));
         assert!(serde_json::from_str::<DeviceState>("{\"output\":\"bogus\"}").is_err());
+        // A file saved before the LED was tracked has neither field.
+        let old: DeviceState =
+            serde_json::from_str("{\"output\":\"headphones\",\"dac_filter\":\"nos\"}").unwrap();
+        assert_eq!((old.lighting_enabled, old.lighting_color), (None, None));
+        assert!(serde_json::from_str::<DeviceState>("{\"lighting_color\":\"red\"}").is_err());
     }
 }

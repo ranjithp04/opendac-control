@@ -220,6 +220,11 @@ pub fn open_and_probe(
         if let Some(f) = t.read_frame(left)? {
             match protocol::decode(&f) {
                 Message::Identity(_) => return Ok(t),
+                // Never log the serial number.
+                Message::Serial(_) => log::debug!("probe: dropping a serial reply"),
+                Message::Unknown(b) if b.get(1) == Some(&protocol::cmd::SERIAL) => {
+                    log::debug!("probe: dropping a malformed serial reply")
+                }
                 other => log::debug!("probe: dropping {other:?}"),
             }
         }

@@ -35,7 +35,7 @@ export interface Eq {
   enabled: boolean;
   /** dB for 31, 62, 125, 250, 500, 1k, 2k, 4k, 8k, 16k Hz; -12..12, step 0.5. Length 10. */
   bands: number[];
-  /** Pre-amp in dB; -6..6, step 0.5. Per output. Not owned by Scout, untouched by Direct Mode. */
+  /** Pre-amp in dB; -6..6, step 0.5. Per output, untouched by Direct Mode. The G6 sets it to 0 while Scout is on and restores it after; not locked by Scout. */
   preamp: number;
 }
 
@@ -45,6 +45,13 @@ export interface EqCurve {
   /** Length 10. */
   bands: number[];
   preamp: number;
+}
+
+/** A user-saved mic EQ curve: the 8 band gains (dB). */
+export interface MicEqCurve {
+  name: string;
+  /** Length 8. */
+  bands: number[];
 }
 
 export interface Effect {
@@ -77,12 +84,52 @@ export interface Mic {
   voiceClarity: boolean;
   /** Voice Clarity noise reduction, 0..1. */
   noiseReduction: number;
-  /** Mic EQ on/off. The 8 band gains are not exposed. */
+  /** Mic EQ on/off. */
   eqEnabled: boolean;
+  /** dB for mic EQ bands 1..8; -12..12, step 0.5. Length 8. The band frequencies are unknown. */
+  eqBands: number[];
   /** Acoustic echo cancellation. */
   aec: boolean;
   /** Recording Smart Volume. */
   smartVolume: boolean;
+}
+
+/** Which USB audio controls a mixer command addresses. */
+export type MixerScope = 'playback' | 'monitoring' | 'recording';
+
+/** Volume and mute of one scope. Both channels are always written together. */
+export interface MixerLevel {
+  /** 0..1, CoreAudio's volume scalar (mean of the channels). */
+  volume: number;
+  /** What the driver says `volume` is in dB; null if it did not tell. */
+  volumeDb: number | null;
+  /** null: the device offers no mute for this scope. */
+  mute: boolean | null;
+}
+
+export interface MixerSource {
+  id: number;
+  name: string;
+}
+
+/**
+ * The G6's USB Audio Class controls as the OS exposes them (not HID). A scope
+ * the OS does not offer is null. Only macOS (CoreAudio) is implemented.
+ */
+export interface Mixer {
+  /** Speaker volume / mute. */
+  playback: MixerLevel | null;
+  /** Monitoring: what is passed from the inputs to the output. */
+  monitoring: MixerLevel | null;
+  /** Recording level / mute of the selected source. */
+  recording: MixerLevel | null;
+  recordingSource: { current: number; options: MixerSource[] } | null;
+}
+
+/** LED lighting. `color` is lower-case `rrggbb` without `#`; "ffffff" while unknown. */
+export interface Lighting {
+  enabled: boolean;
+  color: string;
 }
 
 /**
@@ -106,14 +153,41 @@ export interface AppState {
   mic: Mic;
   dacFilter: DacFilter | null;
   dolbyDecoder: DolbyMode | null;
+  lighting: Lighting;
   /** Preset names, sorted. */
   presets: string[];
   /** Last preset applied or saved ("Preset: X" footer). */
   activePreset: string | null;
   /** User-saved EQ curves in saved order. The built-in curves live in eqCurves.ts. */
   eqCurves: EqCurve[];
+  /** User-saved mic EQ curves in saved order. The built-in presets live in micEqCurves.ts. */
+  micEqCurves: MicEqCurve[];
+  /** Profile to apply when the output becomes headphones / speakers (null: none). */
+  autoSwitch: AutoSwitch;
   launchAtLogin: boolean;
+  /** Global hotkeys (opt-in) and whether each could be registered. */
+  hotkeys: Hotkeys;
+  /** null where the OS offers no mixer (not macOS) or the G6 audio device is not found: hide the Mixer tab. */
+  mixer: Mixer | null;
 }
+
+/** One global hotkey. */
+export interface HotkeyBinding {
+  /** Canonical accelerator as the backend spells it, e.g. "Ctrl+Alt+Cmd+D". */
+  accelerator: string;
+  /** Why it could not be registered (e.g. another app uses it); null when it is registered or the hotkeys are off. */
+  error: string | null;
+}
+
+export interface Hotkeys {
+  enabled: boolean;
+  toggleDirectMode: HotkeyBinding;
+  nextProfile: HotkeyBinding;
+  toggleSbx: HotkeyBinding;
+}
+
+/** Auto-switch rules, by output. A rule naming a deleted profile is cleared by the backend. */
+export type AutoSwitch = Record<Output, string | null>;
 
 // --- Errors --------------------------------------------------------------
 
@@ -132,8 +206,23 @@ export type ErrorCode =
   | 'curveNotFound'
   | 'storage'
   | 'autostart'
+  | 'mixerUnavailable'
   | 'internal'
   | 'notImplemented';
+
+/** Result of `import_eq`: an AutoEq / Equalizer APO text mapped onto the bands and pre-amp. Nothing is written. */
+export interface EqImport {
+  /** Length 10; multiples of 0.5 within +-12 dB. */
+  bands: number[];
+  /** Multiple of 0.5 within +-6 dB. */
+  preamp: number;
+  /** What was clamped, approximated or ignored. */
+  notes: string[];
+}
+
+/** Size limits the Rust side enforces on imported text (`g6_core::preset::MAX_FILE_BYTES`, `g6_core::eq_import::MAX_INPUT_BYTES`). Checked before reading a chosen file. */
+export const MAX_PRESET_FILE_BYTES = 256 * 1024;
+export const MAX_EQ_IMPORT_BYTES = 1024 * 1024;
 
 /** What a rejected command promise carries, and the `device-error` payload. */
 export interface ApiError {
@@ -142,6 +231,14 @@ export interface ApiError {
 }
 
 // --- Events (Rust -> UI) -------------------------------------------------
+
+/** Result of `get_device_info`. A field the device did not answer is null. Hex strings are lowercase. */
+export interface DeviceInfo {
+  firmware: string | null;
+  serial: string | null;
+  dspVersion: string | null;
+  hardwareId: string | null;
+}
 
 export interface ConnectionChanged {
   connection: Connection;
@@ -182,6 +279,8 @@ export interface Commands {
   // State
   get_state: { args: NoArgs; result: AppState };
   refresh_state: { args: NoArgs; result: AppState };
+  /** Cached per connection; never rejects. */
+  get_device_info: { args: NoArgs; result: DeviceInfo };
 
   // EQ, SBX, Scout
   set_eq_enabled: { args: { enabled: boolean }; result: AppState };
@@ -216,13 +315,34 @@ export interface Commands {
   /** level 0..1 */
   set_noise_reduction: { args: { level: number }; result: AppState };
   set_mic_eq_enabled: { args: { enabled: boolean }; result: AppState };
+  /** band 0..7 (mic EQ bands 1..8), gain -12..12 dB in 0.5 steps. */
+  set_mic_eq_band: { args: { band: number; gain: number }; result: AppState };
+  /** Writes all 8 mic EQ bands and turns mic EQ on. Allowed in Direct Mode and Scout. */
+  apply_mic_eq_curve: { args: { bands: number[] }; result: AppState };
+  list_mic_eq_curves: { args: NoArgs; result: MicEqCurve[] };
+  /** Saves the active output's current mic EQ bands (replaces a curve with the same name). */
+  save_mic_eq_curve: { args: { name: string }; result: AppState };
+  delete_mic_eq_curve: { args: { name: string }; result: AppState };
   set_mic_aec: { args: { enabled: boolean }; result: AppState };
   set_mic_smart_volume: { args: { enabled: boolean }; result: AppState };
 
   // Device
   set_dac_filter: { args: { filter: DacFilter }; result: AppState };
+  set_lighting_enabled: { args: { enabled: boolean }; result: AppState };
+  /** color "rrggbb"; rejects invalidValue otherwise. */
+  set_lighting_color: { args: { color: string }; result: AppState };
+  /** Manual override; the headphone jack still switches the output on plug / unplug. */
+  set_output: { args: { output: Output }; result: AppState };
   set_dolby_decoder: { args: { mode: DolbyMode }; result: AppState };
   set_direct_mode: { args: { enabled: boolean }; result: AppState };
+
+  // Mixer (USB audio controls; works in Direct Mode and while the HID side is disconnected)
+  /** volume 0..1, both channels. Rejects invalidValue, mixerUnavailable. */
+  set_mixer_volume: { args: { scope: MixerScope; volume: number }; result: AppState };
+  /** Rejects mixerUnavailable when the scope has no mute. */
+  set_mixer_mute: { args: { scope: MixerScope; mute: boolean }; result: AppState };
+  /** id from `mixer.recordingSource.options`; rejects invalidValue for another id. */
+  set_mixer_source: { args: { id: number }; result: AppState };
 
   // Presets
   list_presets: { args: NoArgs; result: string[] };
@@ -230,9 +350,22 @@ export interface Commands {
   apply_preset: { args: { name: string }; result: AppState };
   rename_preset: { args: { from: string; to: string }; result: AppState };
   delete_preset: { args: { name: string }; result: AppState };
+  /** Opens the native Save dialog and writes the profile there as JSON. Resolves with the path written, or null if cancelled. */
+  export_preset: { args: { name: string }; result: string | null };
+  /** Saves the profile file `text` under `name` (not applied). Rejects invalidValue (bad content), presetInvalidName (bad or taken name). */
+  import_preset: { args: { text: string; name: string }; result: AppState };
+  /** Maps an AutoEq / Equalizer APO text to bands and pre-amp; pure, rejects invalidValue. Apply with `apply_eq_curve`. */
+  import_eq: { args: { text: string }; result: EqImport };
+  /** Profile to apply when the output becomes `output`; null clears the rule. Rejects presetNotFound. */
+  set_auto_switch: { args: { output: Output; profile: string | null }; result: AppState };
 
   // App
   set_launch_at_login: { args: { enabled: boolean }; result: AppState };
+  /** Turns the global hotkeys on / off and sets the accelerators ("" = that action's default). Rejects invalidValue (bad or duplicate accelerator), storage. A shortcut the OS refuses is reported in `hotkeys.*.error`, not as a rejection. */
+  set_hotkeys: {
+    args: { enabled: boolean; toggleDirectMode: string; nextProfile: string; toggleSbx: string };
+    result: AppState;
+  };
   hide_panel: { args: NoArgs; result: null };
   set_app_theme: { args: { theme: 'light' | 'dark' }; result: null };
 }
@@ -320,14 +453,25 @@ export function emptyState(): AppState {
       voiceClarity: false,
       noiseReduction: 0,
       eqEnabled: false,
+      eqBands: new Array<number>(8).fill(0),
       aec: false,
       smartVolume: false,
     },
     dacFilter: null,
     dolbyDecoder: null,
+    lighting: { enabled: false, color: 'ffffff' },
     presets: [],
     activePreset: null,
     eqCurves: [],
+    micEqCurves: [],
+    autoSwitch: { headphones: null, speakers: null },
     launchAtLogin: false,
+    hotkeys: {
+      enabled: false,
+      toggleDirectMode: { accelerator: '', error: null },
+      nextProfile: { accelerator: '', error: null },
+      toggleSbx: { accelerator: '', error: null },
+    },
+    mixer: null,
   };
 }

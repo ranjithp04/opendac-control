@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use crate::features::{Feature, FeatureError};
 use crate::protocol::{
-    self, cmd, DacFilter, Frame, Mask, MaskTarget, Message, MicBoost, Output, ProtocolError,
+    self, cmd, DacFilter, Frame, Mask, MaskTarget, Message, MicBoost, Output, ProtocolError, Rgb,
 };
 use crate::transport::{self, Backoff, Connector, HidConnector, Transport, TransportError};
 
@@ -49,6 +49,10 @@ pub enum Change {
     Mask(Mask),
     DacFilter(DacFilter),
     MicBoost(MicBoost),
+    /// LED on / off.
+    LightingEnabled(bool),
+    /// LED color.
+    LightingColor(Rgb),
 }
 
 /// Outcome of the ACK step of a write.
@@ -159,8 +163,15 @@ impl Default for Config {
 enum Expect {
     /// A decoded reply with this command code (not an ACK / unknown frame).
     Cmd(u8),
-    /// A `5a 11` frame containing this family / id.
+    /// A single-entry `5a 11` frame for this family / id (the read reply,
+    /// `docs/protocol-g6.md` §2.2). Multi-entry frames are pushes: the
+    /// Scout-on push carries a wrong "EQ off" and must not answer a read.
     Feature(u8, u8),
+    /// The LED on / off reply. `5a 3a` carries two kinds of reply, so the
+    /// command code alone cannot tell a pushed colour from the status asked for.
+    LightingEnabled,
+    /// The LED colour reply (see [`Expect::LightingEnabled`]).
+    LightingColor,
 }
 
 impl Expect {
@@ -168,6 +179,7 @@ impl Expect {
         match self {
             Expect::Cmd(c) => c,
             Expect::Feature(..) => cmd::FEATURE_READ,
+            Expect::LightingEnabled | Expect::LightingColor => cmd::LIGHTING,
         }
     }
 
@@ -175,9 +187,11 @@ impl Expect {
         match (self, msg) {
             (_, Message::Ack { .. } | Message::Unknown(_)) => false,
             (Expect::Feature(fam, id), Message::Features(v)) => {
-                v.iter().any(|e| e.family == fam && e.id == id)
+                matches!(v.as_slice(), [e] if e.family == fam && e.id == id)
             }
             (Expect::Feature(..), _) => false,
+            (Expect::LightingEnabled, m) => matches!(m, Message::LightingEnabled(_)),
+            (Expect::LightingColor, m) => matches!(m, Message::LightingColor(_)),
             (Expect::Cmd(c), m) => m.cmd() == Some(c),
         }
     }
@@ -192,7 +206,8 @@ enum Cmd {
         reply: Reply<Message>,
     },
     Write {
-        frame: Frame,
+        /// Sent in order, each waiting for its own ACK, before the read-back.
+        frames: Vec<Frame>,
         readback: Frame,
         expect: Expect,
         reply: Reply<(Message, Ack)>,
@@ -261,8 +276,17 @@ impl Device {
         readback: Frame,
         expect: Expect,
     ) -> Result<(Message, Ack), Error> {
+        self.write_all(vec![frame], readback, expect)
+    }
+
+    fn write_all(
+        &self,
+        frames: Vec<Frame>,
+        readback: Frame,
+        expect: Expect,
+    ) -> Result<(Message, Ack), Error> {
         self.call(|reply| Cmd::Write {
-            frame,
+            frames,
             readback,
             expect,
             reply,
@@ -288,6 +312,18 @@ impl Device {
         match self.query(protocol::firmware(), Expect::Cmd(cmd::FIRMWARE))? {
             Message::Firmware(s) => Ok(s),
             m => Err(unexpected(cmd::FIRMWARE, &m)),
+        }
+    }
+
+    /// Serial number bytes (8). Treat as sensitive: do not log it.
+    pub fn serial(&self) -> Result<[u8; 8], Error> {
+        match self.query(protocol::serial(), Expect::Cmd(cmd::SERIAL))? {
+            Message::Serial(b) => Ok(b),
+            // Not `unexpected()`: that logs the message, which may hold the serial.
+            _ => {
+                log::warn!("unexpected reply to the serial query");
+                Err(Error::Timeout { cmd: cmd::SERIAL })
+            }
         }
     }
 
@@ -390,6 +426,111 @@ impl Device {
                 read_back: x.name().into(),
             }),
             m => Err(unexpected(cmd::DAC_FILTER, &m)),
+        }
+    }
+
+    /// Switch the output by hand (`5a 2c 05 00 MODE 00 00 00`); confirmed by
+    /// reading the output back.
+    ///
+    /// A manual override only: the headphone jack decides the output, so
+    /// the session never re-applies it after a reconnect. The device answers
+    /// with the new output, a dump of its profile and the ACK in the middle
+    /// of the dump; all of it reaches the caller of [`Device::spawn`] as
+    /// events ([`Event::OutputSwitched`], [`Change`]).
+    pub fn set_output(&self, output: Output) -> Result<Written<Output>, Error> {
+        let (msg, ack) = self.write(
+            protocol::output_write(output),
+            protocol::output_read(),
+            Expect::Cmd(cmd::OUTPUT),
+        )?;
+        match msg {
+            Message::Output(x) if x == output => Ok(Written { value: x, ack }),
+            Message::Output(x) => Err(Error::Mismatch {
+                expected: format!("{output:?}"),
+                read_back: format!("{x:?}"),
+            }),
+            m => Err(unexpected(cmd::OUTPUT, &m)),
+        }
+    }
+
+    /// LED on / off.
+    pub fn read_lighting_enabled(&self) -> Result<bool, Error> {
+        match self.query(protocol::lighting_enabled_read(), Expect::LightingEnabled)? {
+            Message::LightingEnabled(x) => Ok(x),
+            m => Err(unexpected(cmd::LIGHTING, &m)),
+        }
+    }
+
+    pub fn set_lighting_enabled(&self, on: bool) -> Result<Written<bool>, Error> {
+        let (msg, ack) = self.write(
+            protocol::lighting_enable_write(on),
+            protocol::lighting_enabled_read(),
+            Expect::LightingEnabled,
+        )?;
+        match msg {
+            Message::LightingEnabled(x) if x == on => Ok(Written { value: x, ack }),
+            Message::LightingEnabled(x) => Err(Error::Mismatch {
+                expected: format!("lighting {on}"),
+                read_back: format!("lighting {x}"),
+            }),
+            m => Err(unexpected(cmd::LIGHTING, &m)),
+        }
+    }
+
+    /// LED color.
+    pub fn read_lighting_color(&self) -> Result<Rgb, Error> {
+        match self.query(protocol::lighting_color_read(), Expect::LightingColor)? {
+            Message::LightingColor(x) => Ok(x),
+            m => Err(unexpected(cmd::LIGHTING, &m)),
+        }
+    }
+
+    /// Set the static LED color. Sends the static-mode frame and then the
+    /// color frame, every time (the mode is the only one the device accepts).
+    /// Does not switch the LED on.
+    pub fn set_lighting_color(&self, rgb: Rgb) -> Result<Written<Rgb>, Error> {
+        let (msg, ack) = self.write_all(
+            vec![
+                protocol::lighting_mode_static(),
+                protocol::lighting_color_write(rgb),
+            ],
+            protocol::lighting_color_read(),
+            Expect::LightingColor,
+        )?;
+        match msg {
+            Message::LightingColor(x) if x == rgb => Ok(Written { value: x, ack }),
+            Message::LightingColor(x) => Err(Error::Mismatch {
+                expected: protocol::rgb_to_hex(rgb),
+                read_back: protocol::rgb_to_hex(x),
+            }),
+            m => Err(unexpected(cmd::LIGHTING, &m)),
+        }
+    }
+
+    /// Creative's hardware Direct Mode (`5a 39`), as the device reports it.
+    pub fn read_hw_direct(&self) -> Result<bool, Error> {
+        match self.query(protocol::hw_direct_read(), Expect::Cmd(cmd::HW_DIRECT))? {
+            Message::HwDirect(x) => Ok(x),
+            m => Err(unexpected(cmd::HW_DIRECT, &m)),
+        }
+    }
+
+    /// Turn the hardware Direct Mode on or off. The write only takes effect
+    /// with the commit (`5a 39 01 01`), which is also the read-back that
+    /// confirms it. Off makes the device push a full profile dump.
+    pub fn set_hw_direct(&self, on: bool) -> Result<Written<bool>, Error> {
+        let (msg, ack) = self.write(
+            protocol::hw_direct_write(on),
+            protocol::hw_direct_read(),
+            Expect::Cmd(cmd::HW_DIRECT),
+        )?;
+        match msg {
+            Message::HwDirect(x) if x == on => Ok(Written { value: x, ack }),
+            Message::HwDirect(x) => Err(Error::Mismatch {
+                expected: format!("hardware direct mode {on}"),
+                read_back: format!("hardware direct mode {x}"),
+            }),
+            m => Err(unexpected(cmd::HW_DIRECT, &m)),
         }
     }
 
@@ -549,12 +690,12 @@ impl Worker {
                 let _ = reply.send(r);
             }
             Cmd::Write {
-                frame,
+                frames,
                 readback,
                 expect,
                 reply,
             } => {
-                let r = self.do_write(&frame, &readback, expect);
+                let r = self.do_write(&frames, &readback, expect);
                 let _ = reply.send(r);
             }
             Cmd::IsConnected(r) => {
@@ -589,13 +730,6 @@ impl Worker {
                 Ok(Some(f)) => {
                     let msg = protocol::decode(&f);
                     if want(&msg) {
-                        // A multi-entry dump that happens to carry our id:
-                        // the other entries are still news.
-                        if let Message::Features(v) = &msg {
-                            if v.len() > 1 {
-                                self.dispatch_push(msg.clone());
-                            }
-                        }
                         return Ok(Some(msg));
                     }
                     self.dispatch_push(msg);
@@ -611,16 +745,29 @@ impl Worker {
 
     fn do_query(&mut self, frame: &Frame, expect: Expect) -> Result<Message, Error> {
         self.send(frame)?;
-        self.await_frame(self.config.reply_timeout, |m| expect.matches(m))?
-            .ok_or(Error::Timeout { cmd: expect.cmd() })
+        // A rejected read comes back as an ACK with an error status instead of
+        // the reply (§2.2a); fail fast on it. Feature reads keep waiting: ids
+        // outside the table are rejected the same way and callers expect a timeout.
+        let cmd = frame[1];
+        let rejects = |m: &Message| {
+            cmd != protocol::cmd::FEATURE_READ
+                && matches!(m, Message::Ack { cmd: c, status } if *c == cmd && !status.is_ok())
+        };
+        match self.await_frame(self.config.reply_timeout, |m| {
+            expect.matches(m) || rejects(m)
+        })? {
+            Some(Message::Ack {
+                status: protocol::AckStatus::Rejected(status),
+                ..
+            }) => Err(Error::Rejected { cmd, status }),
+            Some(m) => Ok(m),
+            None => Err(Error::Timeout { cmd: expect.cmd() }),
+        }
     }
 
-    fn do_write(
-        &mut self,
-        frame: &Frame,
-        readback: &Frame,
-        expect: Expect,
-    ) -> Result<(Message, Ack), Error> {
+    /// Send one write frame and wait for its ACK. The first write after open
+    /// is known not to ACK (§3 item 3); the read-back decides.
+    fn send_acked(&mut self, frame: &Frame) -> Result<Ack, Error> {
         let write_cmd = frame[1];
         let first_write = {
             let link = self.link.as_mut().ok_or(Error::NotConnected)?;
@@ -632,7 +779,7 @@ impl Worker {
             self.config.ack_timeout,
             |m| matches!(m, Message::Ack { cmd, .. } if *cmd == write_cmd),
         )?;
-        let ack = match ack {
+        Ok(match ack {
             Some(Message::Ack { status, .. }) if status.is_ok() => Ack::Ok,
             Some(Message::Ack {
                 status: protocol::AckStatus::Rejected(status),
@@ -653,7 +800,24 @@ impl Worker {
                 }
                 Ack::Missing { first_write }
             }
-        };
+        })
+    }
+
+    fn do_write(
+        &mut self,
+        frames: &[Frame],
+        readback: &Frame,
+        expect: Expect,
+    ) -> Result<(Message, Ack), Error> {
+        // A rejected frame stops the sequence; a missing ACK does not, and the
+        // first missing one is the one reported.
+        let mut ack = Ack::Ok;
+        for frame in frames {
+            let a = self.send_acked(frame)?;
+            if ack == Ack::Ok {
+                ack = a;
+            }
+        }
         let msg = self.do_query(readback, expect)?;
         // The read-back is the device's own report of the new value. Some
         // writes (DAC filter, mic boost) are not echoed as a push, so without
@@ -684,6 +848,13 @@ impl Worker {
             Message::Output(o) => self.emit(Event::OutputSwitched(o)),
             Message::DacFilter(x) => self.emit(Event::Changed(Change::DacFilter(x))),
             Message::MicBoost(x) => self.emit(Event::Changed(Change::MicBoost(x))),
+            Message::LightingEnabled(x) => self.emit(Event::Changed(Change::LightingEnabled(x))),
+            Message::LightingColor(x) => self.emit(Event::Changed(Change::LightingColor(x))),
+            // The serial number is never logged (`Device::serial`).
+            Message::Serial(_) => log::debug!("ignoring unsolicited serial reply"),
+            Message::Unknown(b) if b.get(1) == Some(&cmd::SERIAL) => {
+                log::debug!("ignoring malformed serial reply")
+            }
             Message::Unknown(b) => log::debug!("ignoring unknown push {}", hex(&b)),
             other => log::debug!("ignoring unsolicited {other:?}"),
         }
@@ -701,7 +872,7 @@ fn hex(b: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::features;
-    use crate::transport::fake::{FakeDevice, FAKE_FIRMWARE};
+    use crate::transport::fake::{FakeDevice, FAKE_FIRMWARE, FAKE_SERIAL};
 
     fn fast() -> Config {
         Config {
@@ -766,6 +937,7 @@ mod tests {
         let (d, _rx) = start(&dev);
         assert_eq!(d.identity().unwrap(), vec![0x1f, 0, 0, 0]);
         assert_eq!(d.firmware().unwrap(), FAKE_FIRMWARE);
+        assert_eq!(d.serial().unwrap(), FAKE_SERIAL);
         assert_eq!(d.hw_id().unwrap()[0], 0x97);
         assert_eq!(d.dsp_version().unwrap(), vec![0x30, 0x01, 0x10, 0x00]);
         assert!(d.is_connected());
@@ -819,6 +991,23 @@ mod tests {
             })
         );
         assert_eq!(dev.feature(0x96, 0x00), Some(0.0));
+    }
+
+    #[test]
+    fn rejected_read_fails_fast() {
+        let dev = FakeDevice::new();
+        let (d, _rx) = start(&dev);
+        // The fake rejects a colour read with unknown parameters with `83`.
+        let frame = protocol::encode(cmd::LIGHTING, &[0x0b, 0x01, 0x00, 0x00, 0x01, 0x01]).unwrap();
+        let t = Instant::now();
+        assert_eq!(
+            d.query(frame, Expect::Cmd(cmd::LIGHTING)),
+            Err(Error::Rejected {
+                cmd: cmd::LIGHTING,
+                status: 0x83
+            })
+        );
+        assert!(t.elapsed() < Duration::from_millis(250));
     }
 
     #[test]
@@ -917,6 +1106,38 @@ mod tests {
     }
 
     #[test]
+    fn multi_entry_push_does_not_answer_a_feature_read() {
+        let dev = FakeDevice::new();
+        dev.set_feature(0x96, 0x09, 1.0);
+        let (d, rx) = start(&dev);
+        // The Scout-on push (`docs/protocol-g6.md` §1): Surround off and a
+        // wrong "EQ off", arriving while EQ is being read.
+        dev.push_before_next_reply(&hex_bytes(
+            "5a 11 0e 02 00 96 00 00 00 00 00 96 09 00 00 00 00",
+        ));
+        assert_eq!(d.read_feature(feat("eq")).unwrap(), 1.0);
+        let ev = drain(&rx);
+        for name in ["surround", "eq"] {
+            assert!(
+                ev.contains(&Event::Changed(Change::Feature {
+                    feature: feat(name),
+                    value: 0.0
+                })),
+                "{name} push not dispatched: {ev:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsolicited_serial_reply_is_not_an_event() {
+        let dev = FakeDevice::new();
+        let (_d, rx) = start(&dev);
+        dev.push_raw(&hex_bytes("5a 10 08 ef 67 74 00 00 00 00 00"));
+        dev.push_raw(&hex_bytes("5a 10 02 ef 67"));
+        assert_eq!(drain(&rx), []);
+    }
+
+    #[test]
     fn mask_filter_and_boost_writes() {
         let dev = FakeDevice::new();
         let (d, _rx) = start(&dev);
@@ -939,6 +1160,174 @@ mod tests {
         );
         assert_eq!(d.read_mic_boost().unwrap(), MicBoost::Db10);
         assert_eq!(d.read_output().unwrap(), Output::Headphones);
+    }
+
+    #[test]
+    fn output_write_survives_the_ack_in_the_middle_of_the_dumps() {
+        let dev = FakeDevice::new();
+        let (d, rx) = start(&dev);
+        // Mode reply, profile dump, mask, unknown push, with the ACK between
+        // the dump frames: none of them may be taken for the ACK or the reply.
+        let w = d.set_output(Output::Speakers).unwrap();
+        assert_eq!(w.value, Output::Speakers);
+        assert_eq!(w.ack, Ack::Ok);
+        assert_eq!(dev.output(), Output::Speakers);
+        let sent: Vec<_> = dev
+            .written()
+            .into_iter()
+            .filter(|f| f[1] == cmd::OUTPUT)
+            .collect();
+        assert_eq!(sent[0][..8], hex_bytes("5a 2c 05 00 02 00 00 00")[..]);
+        assert_eq!(sent[1][..4], hex_bytes("5a 2c 01 01")[..]);
+
+        let ev = drain(&rx);
+        assert!(ev.contains(&Event::OutputSwitched(Output::Speakers)));
+        assert!(ev.contains(&Event::Changed(Change::Mask(Mask(0)))));
+        let per_output = features::FEATURES
+            .iter()
+            .filter(|f| features::per_output(f))
+            .count();
+        let dumped = ev
+            .iter()
+            .filter(|e| matches!(e, Event::Changed(Change::Feature { .. })))
+            .count();
+        assert_eq!(dumped, per_output, "every dumped feature became an event");
+        assert_eq!(
+            d.set_output(Output::Headphones).unwrap().value,
+            Output::Headphones
+        );
+        assert_eq!(d.read_output().unwrap(), Output::Headphones);
+    }
+
+    #[test]
+    fn output_write_that_is_not_applied_is_a_mismatch() {
+        let dev = FakeDevice::new();
+        dev.set_ignore_writes(true);
+        let (d, _rx) = start(&dev);
+        assert!(matches!(
+            d.set_output(Output::Speakers),
+            Err(Error::Mismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn lighting_color_sends_the_static_mode_then_the_color() {
+        let dev = FakeDevice::new();
+        let (d, rx) = start(&dev);
+        let w = d.set_lighting_color([0, 255, 0]).unwrap();
+        assert_eq!((w.value, w.ack), ([0, 255, 0], Ack::Ok));
+        assert_eq!(dev.lighting_color(), [0, 255, 0]);
+        assert!(dev.lighting_enabled(), "a color does not switch the LED");
+        let sent: Vec<_> = dev
+            .written()
+            .into_iter()
+            .filter(|f| f[1] == cmd::LIGHTING)
+            .collect();
+        let heads: Vec<_> = sent.iter().map(|f| f[2] as usize + 3).collect();
+        assert_eq!(heads, [9, 12, 9]);
+        assert_eq!(sent[0][..9], hex_bytes("5a 3a 06 04 00 03 01 00 01")[..]);
+        assert_eq!(
+            sent[1][..12],
+            hex_bytes("5a 3a 09 0a 00 03 01 01 ff 00 ff 00")[..]
+        );
+        assert_eq!(sent[2][..9], hex_bytes("5a 3a 06 0b 01 00 01 01 01")[..]);
+        assert_eq!(
+            wait_for(&rx, |e| matches!(
+                e,
+                Event::Changed(Change::LightingColor(_))
+            )),
+            Event::Changed(Change::LightingColor([0, 255, 0]))
+        );
+        assert_eq!(d.read_lighting_color().unwrap(), [0, 255, 0]);
+        // The mode frame goes first on every color set.
+        d.set_lighting_color([0, 0, 255]).unwrap();
+        let n = writes_with_cmd(&dev, cmd::LIGHTING);
+        assert_eq!(n, 3 + 1 + 3, "two sets and one read in between");
+    }
+
+    #[test]
+    fn lighting_color_stops_at_a_rejected_mode_frame() {
+        let dev = FakeDevice::new();
+        dev.reject_next_write(0x83);
+        let (d, _rx) = start(&dev);
+        assert_eq!(
+            d.set_lighting_color([1, 2, 3]),
+            Err(Error::Rejected {
+                cmd: cmd::LIGHTING,
+                status: 0x83
+            })
+        );
+        assert_eq!(writes_with_cmd(&dev, cmd::LIGHTING), 1, "no color frame");
+        assert_eq!(dev.lighting_color(), [255, 0, 0]);
+    }
+
+    #[test]
+    fn lighting_color_missing_first_ack_is_reported_and_read_back_decides() {
+        let dev = FakeDevice::new();
+        dev.set_drop_first_ack(true);
+        let (d, _rx) = start(&dev);
+        let w = d.set_lighting_color([9, 8, 7]).unwrap();
+        assert_eq!(w.value, [9, 8, 7]);
+        assert_eq!(w.ack, Ack::Missing { first_write: true });
+    }
+
+    #[test]
+    fn lighting_enable_write_and_read() {
+        let dev = FakeDevice::new();
+        let (d, rx) = start(&dev);
+        assert!(d.read_lighting_enabled().unwrap());
+        assert!(!d.set_lighting_enabled(false).unwrap().value);
+        assert!(!dev.lighting_enabled());
+        assert!(!d.read_lighting_enabled().unwrap());
+        assert_eq!(
+            wait_for(&rx, |e| matches!(
+                e,
+                Event::Changed(Change::LightingEnabled(_))
+            )),
+            Event::Changed(Change::LightingEnabled(false))
+        );
+        dev.set_ignore_writes(true);
+        assert!(matches!(
+            d.set_lighting_enabled(true),
+            Err(Error::Mismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn lighting_read_is_not_answered_by_the_other_lighting_reply() {
+        let dev = FakeDevice::new();
+        let (d, _rx) = start(&dev);
+        // `5a 3a` carries both replies: a pushed "LED off" ahead of the colour
+        // reply, and a pushed colour ahead of the LED status.
+        dev.push_before_next_reply(&hex_bytes("5a 3a 02 07 00"));
+        assert_eq!(d.read_lighting_color().unwrap(), [255, 0, 0]);
+        dev.push_before_next_reply(&hex_bytes("5a 3a 09 0b 01 00 01 01 ff 00 ff 00"));
+        assert!(d.read_lighting_enabled().unwrap());
+    }
+
+    #[test]
+    fn hw_direct_write_is_committed_and_read_back() {
+        let dev = FakeDevice::new();
+        let (d, rx) = start(&dev);
+        assert!(!d.read_hw_direct().unwrap());
+        let w = d.set_hw_direct(true).unwrap();
+        assert_eq!((w.value, w.ack), (true, Ack::Ok));
+        assert!(dev.hw_direct());
+        let sent: Vec<_> = dev
+            .written()
+            .into_iter()
+            .filter(|f| f[1] == cmd::HW_DIRECT)
+            .collect();
+        assert_eq!(sent[0][..4], hex_bytes("5a 39 01 01")[..], "plain read");
+        assert_eq!(sent[1][..6], hex_bytes("5a 39 03 00 05 01")[..]);
+        assert_eq!(sent[2][..4], hex_bytes("5a 39 01 01")[..], "commit");
+        drain(&rx);
+        // Off pushes a profile dump; it must not be taken for the reply.
+        assert!(!d.set_hw_direct(false).unwrap().value);
+        assert!(!dev.hw_direct());
+        assert!(drain(&rx)
+            .iter()
+            .any(|e| matches!(e, Event::Changed(Change::Feature { .. }))));
     }
 
     #[test]

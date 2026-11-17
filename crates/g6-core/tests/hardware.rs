@@ -9,7 +9,7 @@
 //! original value, write, read back, then restore the original. The restore
 //! runs in a `Drop` guard or after `catch_unwind`, so a failed assertion does
 //! not leave the device changed. Only interface 4 is opened (by
-//! `HidConnector`); only commands from `docs/protocol-g6.md` §2.2 are used. Tests share one
+//! `HidConnector`); only commands from `docs/protocol-g6.md` §2.2 and §2.2a are used. Tests share one
 //! device and serialise on a lock, so `--test-threads=1` is optional but
 //! harmless.
 
@@ -25,7 +25,7 @@ use g6_core::direct::DirectMode;
 use g6_core::events::{Config, Device, Event};
 use g6_core::features::{self, Feature, Kind, FEATURES};
 use g6_core::preset::{self, Preset, PresetProfile};
-use g6_core::protocol::{DacFilter, Mask, MaskTarget, MicBoost};
+use g6_core::protocol::{DacFilter, Mask, MaskTarget, MicBoost, Output};
 
 static DEVICE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -392,6 +392,91 @@ fn hw_mic_boost_roundtrip() {
     }));
     rig.dev.set_mic_boost(original).unwrap();
     assert_eq!(rig.dev.read_mic_boost().unwrap(), original, "restored");
+    if let Err(p) = result {
+        resume_unwind(p);
+    }
+}
+
+#[test]
+#[ignore = "needs a G6 on USB; changes the LED color and on/off briefly (§2.2a)"]
+fn hw_lighting_roundtrip() {
+    let rig = open();
+    let enabled = rig.dev.read_lighting_enabled().unwrap();
+    let color = rig.dev.read_lighting_color().unwrap();
+    let new_color = if color == [0, 0, 255] {
+        [255, 0, 0]
+    } else {
+        [0, 0, 255]
+    };
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let w = rig.dev.set_lighting_color(new_color).unwrap();
+        assert_eq!(w.value, new_color);
+        assert_eq!(rig.dev.read_lighting_color().unwrap(), new_color, "color");
+        assert_eq!(
+            rig.dev.read_lighting_enabled().unwrap(),
+            enabled,
+            "a color does not switch the LED"
+        );
+        let w = rig.dev.set_lighting_enabled(!enabled).unwrap();
+        assert_eq!(w.value, !enabled);
+        assert_eq!(rig.dev.read_lighting_enabled().unwrap(), !enabled, "enable");
+    }));
+    rig.dev.set_lighting_color(color).unwrap();
+    rig.dev.set_lighting_enabled(enabled).unwrap();
+    assert_eq!(
+        rig.dev.read_lighting_color().unwrap(),
+        color,
+        "color restored"
+    );
+    assert_eq!(
+        rig.dev.read_lighting_enabled().unwrap(),
+        enabled,
+        "enable restored"
+    );
+    if let Err(p) = result {
+        resume_unwind(p);
+    }
+}
+
+#[test]
+#[ignore = "needs a G6 on USB; switches the output by hand (the device then dumps the new profile) and back"]
+fn hw_output_switch_and_back() {
+    let rig = open();
+    let original = rig.dev.read_output().unwrap();
+    let other = match original {
+        Output::Headphones => Output::Speakers,
+        Output::Speakers => Output::Headphones,
+    };
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let w = rig.dev.set_output(other).unwrap();
+        assert_eq!(w.value, other);
+        assert_eq!(rig.dev.read_output().unwrap(), other, "read back");
+    }));
+    rig.dev.set_output(original).unwrap();
+    assert_eq!(rig.dev.read_output().unwrap(), original, "restored");
+    if let Err(p) = result {
+        resume_unwind(p);
+    }
+}
+
+#[test]
+#[ignore = "needs a G6 on USB; switches Creative's hardware Direct Mode on and off (§2.2a)"]
+fn hw_hardware_direct_mode_on_and_off() {
+    let rig = open();
+    let original = rig.dev.read_hw_direct().unwrap();
+    let before = read_all(&rig.dev);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let w = rig.dev.set_hw_direct(true).unwrap();
+        assert!(w.value);
+        assert!(rig.dev.read_hw_direct().unwrap(), "FLAG 0x20 = on");
+        let w = rig.dev.set_hw_direct(false).unwrap();
+        assert!(!w.value);
+        assert!(!rig.dev.read_hw_direct().unwrap(), "FLAG 0x00 = off");
+    }));
+    rig.dev.set_hw_direct(original).unwrap();
+    assert_eq!(rig.dev.read_hw_direct().unwrap(), original, "restored");
+    // It changes no register (§2.2a).
+    assert_eq!(read_all(&rig.dev), before, "settings untouched");
     if let Err(p) = result {
         resume_unwind(p);
     }

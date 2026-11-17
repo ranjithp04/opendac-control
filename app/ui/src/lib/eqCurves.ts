@@ -43,3 +43,15 @@ export function matches(a: CurveValues, b: CurveValues): boolean {
     a.bands.every((v, i) => Math.abs(v - b.bands[i]) < 0.01)
   );
 }
+
+/** Pre-amp range the G6 accepts, dB. */
+export const PREAMP_MIN = -6;
+export const PREAMP_MAX = 6;
+
+/** Pre-amp that cancels the largest positive band boost: its negative, in 0.5 dB steps, within the pre-amp range. */
+export function suggestPreamp(bands: readonly number[]): number {
+  const boost = Math.max(0, ...bands);
+  const v = Math.round(-boost * 2) / 2;
+  // `+ 0` turns -0 into 0.
+  return Math.min(PREAMP_MAX, Math.max(PREAMP_MIN, v)) + 0;
+}

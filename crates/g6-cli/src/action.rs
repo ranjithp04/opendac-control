@@ -2,12 +2,15 @@
 //! the feature table here, before any device is opened.
 
 use std::fmt;
+use std::path::PathBuf;
 
 use g6_core::features::{self, parse_eq_band, Feature, Kind, EQ_BANDS};
-use g6_core::protocol::{DacFilter, MaskTarget, MicBoost};
+use g6_core::protocol::{rgb_from_hex, DacFilter, MaskTarget, MicBoost, Output, Rgb};
+use g6_core::state::output_from_name;
 
 use crate::cli::{
-    Command, EffectArgs, EqCommand, MicCommand, PresetCommand, Setting, SmartvolArgs, SurroundArgs,
+    Command, EffectArgs, EqCommand, LightCommand, MicCommand, PresetCommand, Setting, SmartvolArgs,
+    SurroundArgs,
 };
 
 /// Bad user input.
@@ -34,6 +37,9 @@ pub enum Op {
     Mask(MaskTarget, bool),
     DacFilter(DacFilter),
     MicBoost(MicBoost),
+    LightEnabled(bool),
+    LightColor(Rgb),
+    Output(Output),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -42,6 +48,8 @@ pub enum PresetAction {
     Load(String),
     List,
     Delete(String),
+    Export { name: String, file: PathBuf },
+    Import { file: PathBuf, name: Option<String> },
 }
 
 /// What a command line asks for.
@@ -51,24 +59,33 @@ pub enum Action {
     Status {
         json: bool,
     },
-    Watch,
+    Watch {
+        json: bool,
+    },
+    Serve {
+        port: u16,
+    },
     /// Device writes, in order.
     Apply(Vec<Op>),
     Direct(bool),
     Preset(PresetAction),
+    /// `eq import FILE`: the text is parsed when the command runs, before any device is opened.
+    EqImport(PathBuf),
 }
 
 pub fn build(command: Command) -> Result<Action, UsageError> {
     Ok(match command {
         Command::Info => Action::Info,
         Command::Status(a) => Action::Status { json: a.json },
-        Command::Watch => Action::Watch,
+        Command::Watch(a) => Action::Watch { json: a.json },
+        Command::Serve(a) => Action::Serve { port: a.port },
         Command::Eq(EqCommand::On) => Action::Apply(vec![feature_op("eq", 1.0)?]),
         Command::Eq(EqCommand::Off) => Action::Apply(vec![feature_op("eq", 0.0)?]),
         Command::Eq(EqCommand::Set { bands }) => Action::Apply(eq_set(&bands)?),
         Command::Eq(EqCommand::Preamp { db }) => {
             Action::Apply(vec![ui_op("eq_preamp", "EQ pre-amp", db)?])
         }
+        Command::Eq(EqCommand::Import { file }) => Action::EqImport(file),
         Command::Sbx(t) => Action::Apply(vec![Op::Mask(MaskTarget::Sbx, t.state.is_on())]),
         Command::Scout(t) => Action::Apply(vec![Op::Mask(MaskTarget::Scout, t.state.is_on())]),
         Command::Surround(a) => Action::Apply(surround(&a)?),
@@ -85,11 +102,27 @@ pub fn build(command: Command) -> Result<Action, UsageError> {
         }
         Command::Mic(m) => Action::Apply(vec![mic(m)?]),
         Command::Direct(t) => Action::Direct(t.state.is_on()),
+        Command::Light(LightCommand::On) => Action::Apply(vec![Op::LightEnabled(true)]),
+        Command::Light(LightCommand::Off) => Action::Apply(vec![Op::LightEnabled(false)]),
+        Command::Light(LightCommand::Color { rgb }) => match rgb_from_hex(&rgb) {
+            Some(c) => Action::Apply(vec![Op::LightColor(c)]),
+            None => {
+                return usage(format!(
+                    "light color must be six hex digits RRGGBB (e.g. ff8000), not '{rgb}'"
+                ))
+            }
+        },
+        Command::Output(a) => match output_from_name(&a.output) {
+            Some(o) => Action::Apply(vec![Op::Output(o)]),
+            None => return usage(format!("unknown output '{}'", a.output)),
+        },
         Command::Preset(p) => Action::Preset(match p {
             PresetCommand::Save { name } => PresetAction::Save(name),
             PresetCommand::Load { name } => PresetAction::Load(name),
             PresetCommand::List => PresetAction::List,
             PresetCommand::Delete { name } => PresetAction::Delete(name),
+            PresetCommand::Export { name, file } => PresetAction::Export { name, file },
+            PresetCommand::Import { file, name } => PresetAction::Import { file, name },
         }),
     })
 }
@@ -104,7 +137,7 @@ fn feature(name: &str) -> Result<&'static Feature, UsageError> {
 }
 
 /// Write of a device-side on/off value to a Bool feature.
-fn feature_op(name: &str, device_value: f32) -> Result<Op, UsageError> {
+pub(crate) fn feature_op(name: &str, device_value: f32) -> Result<Op, UsageError> {
     let f = feature(name)?;
     match f.validate_write(device_value) {
         Ok(v) => Ok(Op::Feature(f, v)),
@@ -113,7 +146,7 @@ fn feature_op(name: &str, device_value: f32) -> Result<Op, UsageError> {
 }
 
 /// Validate a value as the user sees it (UI scale) and build the write.
-fn ui_op(name: &str, label: &str, ui: f32) -> Result<Op, UsageError> {
+pub(crate) fn ui_op(name: &str, label: &str, ui: f32) -> Result<Op, UsageError> {
     let f = feature(name)?;
     let (lo, hi) = (f.to_ui(f.min), f.to_ui(f.max));
     if !ui.is_finite() || ui < lo || ui > hi {
@@ -131,7 +164,7 @@ fn ui_op(name: &str, label: &str, ui: f32) -> Result<Op, UsageError> {
     }
 }
 
-fn choice_op(name: &str, choice: &str) -> Result<Op, UsageError> {
+pub(crate) fn choice_op(name: &str, choice: &str) -> Result<Op, UsageError> {
     let f = feature(name)?;
     match f.choice_value(choice) {
         Some(v) => Ok(Op::Feature(f, v)),
@@ -359,6 +392,42 @@ mod tests {
     }
 
     #[test]
+    fn light_and_output() {
+        assert_eq!(
+            parse(&["light", "on"]).unwrap(),
+            Action::Apply(vec![Op::LightEnabled(true)])
+        );
+        assert_eq!(
+            parse(&["light", "off"]).unwrap(),
+            Action::Apply(vec![Op::LightEnabled(false)])
+        );
+        for arg in ["ff8000", "#FF8000", "#ff8000"] {
+            assert_eq!(
+                parse(&["light", "color", arg]).unwrap(),
+                Action::Apply(vec![Op::LightColor([255, 128, 0])]),
+                "{arg}"
+            );
+        }
+        for bad in [
+            "ff80", "ff80000", "gg0000", "red", "#", "0xff8000", "##ff8000",
+        ] {
+            assert!(
+                err(&["light", "color", bad]).contains("six hex digits"),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            parse(&["output", "speakers"]).unwrap(),
+            Action::Apply(vec![Op::Output(Output::Speakers)])
+        );
+        assert_eq!(
+            parse(&["output", "headphones"]).unwrap(),
+            Action::Apply(vec![Op::Output(Output::Headphones)])
+        );
+        assert!(err(&["output", "tv"]).contains("invalid value"));
+    }
+
+    #[test]
     fn mic_commands() {
         assert_eq!(
             parse(&["mic", "boost", "20"]).unwrap(),
@@ -385,7 +454,15 @@ mod tests {
             parse(&["status", "--json"]).unwrap(),
             Action::Status { json: true }
         );
-        assert_eq!(parse(&["watch"]).unwrap(), Action::Watch);
+        assert_eq!(parse(&["watch"]).unwrap(), Action::Watch { json: false });
+        assert_eq!(
+            parse(&["watch", "--json"]).unwrap(),
+            Action::Watch { json: true }
+        );
+        assert_eq!(
+            parse(&["serve", "--port", "9000"]).unwrap(),
+            Action::Serve { port: 9000 }
+        );
         assert_eq!(
             parse(&["preset", "save", "movies"]).unwrap(),
             Action::Preset(PresetAction::Save("movies".into()))

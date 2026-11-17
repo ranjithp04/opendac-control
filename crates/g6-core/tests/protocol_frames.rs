@@ -15,6 +15,7 @@ fn builder_table() -> Vec<(&'static str, Frame, &'static str)> {
     vec![
         ("identity", identity(), "5a 05 00"),
         ("firmware", firmware(), "5a 07 01 02"),
+        ("serial", serial(), "5a 10 00"),
         ("hw_id", hw_id(), "5a 20 00"),
         ("dsp_version", dsp_version(), "5a 30 00"),
         ("mask_read", mask_read(), "5a 26 03 08 ff ff"),
@@ -70,11 +71,52 @@ fn builder_table() -> Vec<(&'static str, Frame, &'static str)> {
             mic_boost_write(MicBoost::Db30),
             "5a 3c 04 00 00 02 1e",
         ),
+        (
+            "output speakers",
+            output_write(Output::Speakers),
+            "5a 2c 05 00 02 00 00 00",
+        ),
+        (
+            "output headphones",
+            output_write(Output::Headphones),
+            "5a 2c 05 00 04 00 00 00",
+        ),
+        ("light on", lighting_enable_write(true), "5a 3a 02 06 01"),
+        ("light off", lighting_enable_write(false), "5a 3a 02 06 00"),
+        ("light enabled read", lighting_enabled_read(), "5a 3a 01 07"),
+        (
+            "light static mode",
+            lighting_mode_static(),
+            "5a 3a 06 04 00 03 01 00 01",
+        ),
+        (
+            "light red",
+            lighting_color_write([255, 0, 0]),
+            "5a 3a 09 0a 00 03 01 01 ff 00 00 ff",
+        ),
+        (
+            "light green",
+            lighting_color_write([0, 255, 0]),
+            "5a 3a 09 0a 00 03 01 01 ff 00 ff 00",
+        ),
+        (
+            "light blue",
+            lighting_color_write([0, 0, 255]),
+            "5a 3a 09 0a 00 03 01 01 ff ff 00 00",
+        ),
+        (
+            "light color read",
+            lighting_color_read(),
+            "5a 3a 06 0b 01 00 01 01 01",
+        ),
+        ("hw direct on", hw_direct_write(true), "5a 39 03 00 05 01"),
+        ("hw direct off", hw_direct_write(false), "5a 39 03 00 05 00"),
+        ("hw direct commit", hw_direct_read(), "5a 39 01 01"),
     ]
 }
 
 #[test]
-fn every_fixed_builder_has_the_exact_bytes_of_plan_7_2() {
+fn every_fixed_builder_has_the_exact_bytes_of_protocol_doc_2_2() {
     for (name, frame, expected) in builder_table() {
         assert_eq!(frame.len(), REPORT_LEN, "{name}");
         assert_frame(&frame, expected);
@@ -336,7 +378,7 @@ fn capture_dump8_entries_raw_and_rounded() {
         panic!("not features")
     };
     assert_eq!(v.len(), 8);
-    // `fd ff 7f bf` and `00 00 40 34` are the float noise the plan names.
+    // `fd ff 7f bf` and `00 00 40 34` are the float noise of the dump in `docs/protocol-g6.md` §2.4.
     assert_eq!(v[0].value.to_bits(), 0xbf7f_fffd);
     assert_eq!(v[1].value.to_bits(), 0x3440_0000);
     let names: Vec<&str> = v.iter().map(|e| e.known().unwrap().0.name).collect();
@@ -376,10 +418,14 @@ fn captured_ack_statuses() {
 }
 
 #[test]
-fn replies_of_plan_7_2_decode() {
+fn replies_of_protocol_doc_2_2_decode() {
     assert_eq!(
         decode(&report("5a 05 04 1f 00 00 00")),
         Message::Identity(vec![0x1f, 0, 0, 0])
+    );
+    assert_eq!(
+        decode(&report("5a 10 08 ef 67 74 00 00 00 00 00")),
+        Message::Serial([0xef, 0x67, 0x74, 0, 0, 0, 0, 0])
     );
     assert!(matches!(decode(&report("5a 20 04 97 00 00 00")), Message::HwId(v) if v[0] == 0x97));
     assert_eq!(
@@ -394,7 +440,7 @@ fn replies_of_plan_7_2_decode() {
         let m = decode(&report(&format!("5a 3c 04 01 00 02 {:02x}", b.db())));
         assert_eq!(m, Message::MicBoost(b));
     }
-    // Firmware with the trailing NUL the plan mentions.
+    // Firmware with the trailing NUL (`docs/protocol-g6.md` §2.2).
     let mut fw = vec![0x5a, 0x07, 0x10];
     fw.extend_from_slice(b"2.1.250903.1324\0");
     assert_eq!(decode(&fw), Message::Firmware("2.1.250903.1324".into()));
@@ -410,6 +456,7 @@ fn every_reply_reports_its_command_code() {
         ("5a 02 0a 12 00", 0x02),
         ("5a 05 04 1f 00 00 00", 0x05),
         ("5a 07 02 31 00", 0x07),
+        ("5a 10 08 ef 67 74 00 00 00 00 00", 0x10),
         ("5a 11 08 01 00 96 09 00 00 80 3f", 0x11),
         ("5a 20 04 97 00 00 00", 0x20),
         ("5a 26 0b 08 ff ff 01", 0x26),

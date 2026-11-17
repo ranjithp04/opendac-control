@@ -1,6 +1,7 @@
 //! Command-line grammar (clap). Parsing only: range checks against the
 //! feature table happen in [`crate::action`].
 
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use clap::builder::PossibleValuesParser;
@@ -36,12 +37,12 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Show firmware version and hardware ids.
+    /// Show firmware version, serial number and hardware ids.
     Info,
     /// Show the full device state.
     Status(StatusArgs),
     /// Stream changes pushed by the device (buttons, jack switch, replug). Ctrl-C to stop.
-    Watch,
+    Watch(WatchArgs),
     /// Equalizer: switch on/off, set band gains or the pre-amp.
     #[command(subcommand)]
     Eq(EqCommand),
@@ -66,11 +67,35 @@ pub enum Command {
     /// Microphone settings.
     #[command(subcommand)]
     Mic(MicCommand),
-    /// Direct Mode: SBX, Scout and EQ off (restored when switched off).
+    /// Direct Mode: SBX, Scout and EQ off, plus the hardware Direct Mode (restored when switched off).
     Direct(ToggleArg),
+    /// LED: on, off or a static color.
+    #[command(subcommand)]
+    Light(LightCommand),
+    /// Switch the output by hand (the headphone jack normally decides).
+    Output(OutputArgs),
     /// Save, load, list or delete presets.
     #[command(subcommand)]
     Preset(PresetCommand),
+    /// Serve a local HTTP API (127.0.0.1 only, bearer token) for Stream Deck, Home Assistant and scripts.
+    Serve(ServeArgs),
+}
+
+/// Default port of `g6 serve`.
+pub const DEFAULT_API_PORT: u16 = 8765;
+
+#[derive(Debug, Args)]
+pub struct ServeArgs {
+    /// TCP port on 127.0.0.1 (0 picks a free one).
+    #[arg(long, value_name = "PORT", default_value_t = DEFAULT_API_PORT)]
+    pub port: u16,
+}
+
+#[derive(Debug, Args)]
+pub struct WatchArgs {
+    /// One JSON object per line instead of text (keys are documented in the README).
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -184,6 +209,15 @@ pub enum EqCommand {
         #[arg(value_name = "-6..6", allow_hyphen_values = true)]
         db: f32,
     },
+    /// Set the bands and pre-amp from an AutoEq / Equalizer APO text file
+    /// ('Preamp:', 'Filter N: ON PK Fc .. Gain .. Q ..' or 'GraphicEQ:' lines).
+    /// Filters are evaluated at the 10 band centres, rounded to 0.5 dB and
+    /// clamped (bands +-12, pre-amp +-6); what was clamped or approximated is
+    /// printed on stderr. Does not change whether the EQ is on.
+    Import {
+        /// Text file to read.
+        file: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -208,6 +242,27 @@ pub enum MicCommand {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum LightCommand {
+    /// Switch the LED on.
+    On,
+    /// Switch the LED off.
+    Off,
+    /// Set the static color, e.g. `light color ff8000` (quote it with a
+    /// leading `#`). Does not switch the LED on.
+    Color {
+        #[arg(value_name = "RRGGBB")]
+        rgb: String,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct OutputArgs {
+    /// Output to switch to.
+    #[arg(value_parser = ["headphones", "speakers"])]
+    pub output: String,
+}
+
+#[derive(Debug, Subcommand)]
 pub enum PresetCommand {
     /// Save the current settings under NAME.
     Save { name: String },
@@ -217,6 +272,18 @@ pub enum PresetCommand {
     List,
     /// Delete preset NAME.
     Delete { name: String },
+    /// Write preset NAME to FILE (JSON, the format of the stored preset).
+    /// Overwrites FILE.
+    Export { name: String, file: PathBuf },
+    /// Save the preset in FILE (JSON, as written by `preset export`) after
+    /// checking every value. The name defaults to the file name without
+    /// `.json`. An existing preset of that name is not replaced.
+    Import {
+        file: PathBuf,
+        /// Preset name (default: the file name without extension).
+        #[arg(long)]
+        name: Option<String>,
+    },
 }
 
 /// Allowed names of a `Kind::Choice` feature, straight from the feature table.
@@ -251,12 +318,16 @@ mod tests {
 
     /// Every documented `g6` command line (README), with concrete values.
     #[test]
-    fn every_plan_command_line_parses() {
+    fn every_documented_command_line_parses() {
         let lines: &[&[&str]] = &[
             &["info"],
             &["status"],
             &["status", "--json"],
             &["watch"],
+            &["watch", "--json"],
+            &["serve"],
+            &["serve", "--port", "9000"],
+            &["serve", "--port", "0"],
             &["eq", "on"],
             &["eq", "off"],
             &["eq", "set", "31=3", "62=2", "1k=-1"],
@@ -298,10 +369,20 @@ mod tests {
             &["mic", "aec", "on"],
             &["direct", "on"],
             &["direct", "off"],
+            &["light", "on"],
+            &["light", "off"],
+            &["light", "color", "ff8000"],
+            &["light", "color", "#FF8000"],
+            &["output", "headphones"],
+            &["output", "speakers"],
             &["preset", "save", "movies"],
             &["preset", "load", "movies"],
             &["preset", "list"],
             &["preset", "delete", "movies"],
+            &["preset", "export", "movies", "movies.json"],
+            &["preset", "import", "movies.json"],
+            &["preset", "import", "movies.json", "--name", "night"],
+            &["eq", "import", "autoeq.txt"],
         ];
         for line in lines {
             parse(line).unwrap_or_else(|e| panic!("`g6 {}` failed: {e}", line.join(" ")));
@@ -319,7 +400,22 @@ mod tests {
             parse(&["status"]).unwrap().command,
             Command::Status(StatusArgs { json: false })
         ));
-        assert!(matches!(parse(&["watch"]).unwrap().command, Command::Watch));
+        assert!(matches!(
+            parse(&["watch"]).unwrap().command,
+            Command::Watch(WatchArgs { json: false })
+        ));
+        assert!(matches!(
+            parse(&["watch", "--json"]).unwrap().command,
+            Command::Watch(WatchArgs { json: true })
+        ));
+        let Command::Serve(a) = parse(&["serve"]).unwrap().command else {
+            panic!("not serve")
+        };
+        assert_eq!(a.port, DEFAULT_API_PORT);
+        let Command::Serve(a) = parse(&["serve", "--port", "9000"]).unwrap().command else {
+            panic!("not serve")
+        };
+        assert_eq!(a.port, 9000);
         assert!(matches!(
             parse(&["eq", "on"]).unwrap().command,
             Command::Eq(EqCommand::On)
@@ -343,6 +439,20 @@ mod tests {
             parse(&["direct", "on"]).unwrap().command,
             Command::Direct(ToggleArg { state: Toggle::On })
         ));
+        assert!(matches!(
+            parse(&["light", "off"]).unwrap().command,
+            Command::Light(LightCommand::Off)
+        ));
+        let Command::Light(LightCommand::Color { rgb }) =
+            parse(&["light", "color", "#ff8000"]).unwrap().command
+        else {
+            panic!("not light color")
+        };
+        assert_eq!(rgb, "#ff8000");
+        let Command::Output(a) = parse(&["output", "speakers"]).unwrap().command else {
+            panic!("not output")
+        };
+        assert_eq!(a.output, "speakers");
         let Command::Smartvol(a) = parse(&["smartvol", "0.9", "--mode", "night"])
             .unwrap()
             .command
@@ -429,7 +539,7 @@ mod tests {
             kind(&[]),
             ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
         );
-        for sub in ["eq", "mic", "preset"] {
+        for sub in ["eq", "mic", "light", "preset"] {
             assert_eq!(
                 kind(&[sub]),
                 ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
@@ -458,6 +568,8 @@ mod tests {
             &["sbx"][..],
             &["scout"],
             &["direct"],
+            &["light", "color"],
+            &["output"],
             &["bass"],
             &["crystalizer"],
             &["dialog"],
@@ -470,6 +582,10 @@ mod tests {
             &["preset", "save"],
             &["preset", "load"],
             &["preset", "delete"],
+            &["preset", "export"],
+            &["preset", "export", "movies"],
+            &["preset", "import"],
+            &["eq", "import"],
         ] {
             assert_eq!(
                 kind(args),
@@ -478,6 +594,16 @@ mod tests {
                 args.join(" ")
             );
         }
+    }
+
+    #[test]
+    fn serve_port_must_be_a_port_number() {
+        for bad in ["65536", "-1", "abc", ""] {
+            assert!(parse(&["serve", "--port", bad]).is_err(), "{bad:?}");
+        }
+        assert!(parse(&["serve", "--port"]).is_err());
+        assert!(parse(&["serve", "--host", "0.0.0.0"]).is_err());
+        assert!(parse(&["watch", "--yaml"]).is_err());
     }
 
     #[test]
@@ -518,6 +644,13 @@ mod tests {
         );
         for ok in ["0", "10", "20", "30"] {
             assert!(parse(&["mic", "boost", ok]).is_ok());
+        }
+        for bad in ["tv", "Speakers", "1", ""] {
+            assert_eq!(
+                kind(&["output", bad]),
+                ErrorKind::InvalidValue,
+                "output {bad:?}"
+            );
         }
         for bad in ["5", "40", "-10", "20dB"] {
             assert!(parse(&["mic", "boost", bad]).is_err(), "boost {bad}");

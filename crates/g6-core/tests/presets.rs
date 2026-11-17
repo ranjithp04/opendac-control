@@ -341,7 +341,7 @@ fn save_current_then_load_restores_the_device() {
 #[test]
 fn the_pre_amp_is_saved_and_applied_per_output() {
     let fake = FakeDevice::new(); // headphones
-    let (dev, _rx) = start(&fake);
+    let (dev, rx) = start(&fake);
     let p = Preset {
         headphones: Some(profile(&[("eq_preamp", -3.0)])),
         speakers: Some(profile(&[("eq_preamp", 2.5)])),
@@ -352,6 +352,9 @@ fn the_pre_amp_is_saved_and_applied_per_output() {
 
     preset::apply(&dev, &p).unwrap();
     assert_eq!(get(&fake, "eq_preamp"), -3.0);
+    // One reader per fake: the first device must be gone before the second
+    // opens, or the two compete for the replies.
+    drop((dev, rx));
     fake.switch_output(Output::Speakers);
     let (dev, _rx) = start(&fake);
     preset::apply(&dev, &p).unwrap();
@@ -404,6 +407,29 @@ fn apply_write_order_is_scout_off_sbx_features_scout_on() {
     assert_eq!(w.len(), 2);
     assert_eq!(w[0][1], 0x12);
     assert_eq!(&w[1][..8], &hex("5a 26 05 07 02 00 01 00")[..]);
+}
+
+#[test]
+fn apply_with_scout_on_keeps_the_users_sbx_for_scout_off() {
+    // Captured while Scout was on: the mask shows SBX off.
+    let fake = FakeDevice::new();
+    fake.press_mask(Mask::SBX);
+    let (dev, _rx) = start(&fake);
+    let p = Preset {
+        headphones: Some(PresetProfile {
+            sbx: Some(false),
+            scout: Some(true),
+            ..profile(&[])
+        }),
+        speakers: None,
+    };
+    let r = preset::apply(&dev, &p).unwrap();
+    assert_eq!(r.writes, 1, "Scout on only");
+    assert_eq!(fake.mask(), Mask::SCOUT);
+    // Scout off brings back the SBX the user had before.
+    dev.set_mask(g6_core::protocol::MaskTarget::Scout, false)
+        .unwrap();
+    assert_eq!(fake.mask(), Mask::SBX);
 }
 
 #[test]

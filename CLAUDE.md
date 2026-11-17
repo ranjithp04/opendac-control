@@ -23,11 +23,11 @@ npm run tauri dev                                       # full app, opens the re
 npm run tauri build                                     # release bundles (.app/.dmg, or NSIS/MSI on Windows)
 ```
 
-`cargo build -p opendac-control` works without Node: `app/src-tauri/build.rs` creates an empty `app/ui/dist` if the UI was not built. Don't run the hardware tests or `tauri dev` / `g6` commands unless the user wants the device touched. CI (`.github/workflows/build.yml`) builds the unsigned macOS and Windows bundles only on `v*` tags or manual dispatch.
+`cargo build -p opendac-control` works without Node: `app/src-tauri/build.rs` creates an empty `app/ui/dist` if the UI was not built. Don't run the hardware tests or `tauri dev` / `g6` commands unless the user wants the device touched. CI (`.github/workflows/build.yml`) runs fmt, clippy, `cargo test --workspace` and `npm run check` on macOS and Windows, then builds the unsigned bundles, only on `v*` tags or manual dispatch.
 
 ## Architecture
 
-Four layers; all device access goes through `g6-core`:
+Four layers; all HID access goes through `g6-core` (the macOS Mixer tab uses CoreAudio from `app/src-tauri/src/mixer/`, not HID):
 
 1. **`crates/g6-core`** (library). Bottom-up:
    - `transport.rs`: hidapi behind `Transport` / `Connector` traits; `transport/fake.rs` is the fake device all tests use.
@@ -45,7 +45,7 @@ Four layers; all device access goes through `g6-core`:
 Device behaviour that shapes the code (details in `docs/protocol-g6.md`):
 
 - The G6 keeps separate EQ, effects and mic settings per output (headphones/speakers) and switches output on the jack automatically.
-- Scout Mode owns the EQ bands and Smart Volume but not the EQ pre-amp. Turning Scout on turns SBX off.
+- Scout Mode owns the EQ bands and Smart Volume. It also sets the EQ pre-amp to 0 dB and restores it when Scout turns off (`docs/protocol-g6.md` section 1), so profiles and re-applies leave the pre-amp out while Scout is on (`features::scout_resets`); a user pre-amp write is still allowed and becomes the value kept after Scout turns off. Turning Scout on turns SBX off.
 - The G6 may come back from a USB replug with settings reset, hence the re-apply logic.
 - Direct Mode saves SBX/Scout/EQ/effects state to disk before turning them off, and never touches mic settings.
 - The first write after opening the device gets no ACK; the read-back decides.
@@ -53,7 +53,7 @@ Device behaviour that shapes the code (details in `docs/protocol-g6.md`):
 ## Rules
 
 - **Never open HID interface 3** (the volume knob). Opening it stops macOS from receiving the knob until a replug. Only interface 4 is opened.
-- **Only write registers in the `features.rs` allow-list**, with range checks before anything reaches the device. New settings go through the feature table.
+- **Only write registers in the `features.rs` allow-list**, with range checks before anything reaches the device. New f32 settings (`5a 12`) go through the feature table. The other write commands (`0x26` SBX/Scout mask, `0x2c` output, `0x6c` DAC filter, `0x3c` mic boost, `0x3a` lighting, `0x39` hardware Direct Mode) are built only by typed builders in `protocol.rs` with fixed payloads and enum / bool / `Rgb` arguments; a new non-f32 command follows that pattern. `Device` exposes no raw-frame write. The Mixer's CoreAudio writes check their own 0..1 range and source ids.
 - Protocol facts verified on hardware belong in `docs/protocol-g6.md`. The code doesn't depend on `soundblaster-x-g6-cli` (GPL); the MIT-licensed `linuxblaster_control` notes are credited in the README.
 - `PLAN.md` is untracked, so don't reference it from tracked files.
 - Windows paths for stored settings follow the `directories` crate; the README lists where each file lives.
