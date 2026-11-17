@@ -198,14 +198,17 @@ fn find_selector(part: &IPart, depth: u32) -> Option<(IAudioInputSelector, IPart
         .find_map(|p| find_selector(&p, depth + 1))
 }
 
-/// The selector of a capture endpoint, with the part that holds it.
-fn selector_of(device: &IMMDevice) -> Option<(IAudioInputSelector, IPart)> {
+/// The connector of an endpoint's signal path on the adapter side, as a part.
+fn adapter_part(device: &IMMDevice) -> Option<IPart> {
     let topology: IDeviceTopology = unsafe { device.Activate(CLSCTX_ALL, None) }.ok()?;
     let own: IConnector = unsafe { topology.GetConnector(0) }.ok()?;
-    // The connector of the same signal path on the adapter side.
     let adapter_side: IConnector = unsafe { own.GetConnectedTo() }.ok()?;
-    let part: IPart = adapter_side.cast().ok()?;
-    find_selector(&part, 0)
+    adapter_side.cast().ok()
+}
+
+/// The selector of a capture endpoint, with the part that holds it.
+fn selector_of(device: &IMMDevice) -> Option<(IAudioInputSelector, IPart)> {
+    find_selector(&adapter_part(device)?, 0)
 }
 
 /// The inputs a selector chooses between: the local id and name of each part feeding it.
@@ -239,6 +242,103 @@ fn sources(device: &IMMDevice) -> Option<MixerSources> {
     }
     let current = unsafe { selector.GetSelection() }.ok()?;
     Some(MixerSources { current, options })
+}
+
+// --- Diagnostic dump ----------------------------------------------------
+
+/// Set this environment variable to write the audio topology to `opendac-mixer-topology.txt` in
+/// the temp folder at start-up: what Windows shows for the G6, to see which controls it offers.
+const DUMP_VAR: &str = "OPENDAC_MIXER_DUMP";
+
+fn dump_part(out: &mut String, part: &IPart, depth: usize, incoming: bool, seen: &mut Vec<String>) {
+    use std::fmt::Write;
+    let indent = "  ".repeat(depth);
+    let id = unsafe { part.GetGlobalId() }
+        .map(take_string)
+        .unwrap_or_default();
+    if depth > MAX_TOPOLOGY_DEPTH as usize || seen.contains(&id) {
+        return;
+    }
+    seen.push(id.clone());
+    let name = unsafe { part.GetName() }
+        .map(take_string)
+        .unwrap_or_default();
+    let kind = match unsafe { part.GetPartType() } {
+        Ok(t) if t == Subunit => "subunit",
+        Ok(_) => "connector",
+        Err(_) => "?",
+    };
+    let local = unsafe { part.GetLocalId() }.unwrap_or(0);
+    let sub = unsafe { part.GetSubType() }
+        .map(|g| format!("{g:?}"))
+        .unwrap_or_default();
+    let controls: Vec<String> = (0..unsafe { part.GetControlInterfaceCount() }.unwrap_or(0))
+        .filter_map(|i| unsafe { part.GetControlInterface(i) }.ok())
+        .map(|c| {
+            let iid = unsafe { c.GetIID() }
+                .map(|g| format!("{g:?}"))
+                .unwrap_or_default();
+            let n = unsafe { c.GetName() }.map(take_string).unwrap_or_default();
+            format!("{n} {iid}")
+        })
+        .collect();
+    let _ = writeln!(
+        out,
+        "{indent}{kind} {name:?} local={local} subtype={sub} id={id}"
+    );
+    for c in controls {
+        let _ = writeln!(out, "{indent}  control: {c}");
+    }
+    let next = unsafe {
+        if incoming {
+            part.EnumPartsIncoming()
+        } else {
+            part.EnumPartsOutgoing()
+        }
+    };
+    if let Ok(list) = next {
+        for i in 0..unsafe { list.GetCount() }.unwrap_or(0) {
+            if let Ok(p) = unsafe { list.GetPart(i) } {
+                dump_part(out, &p, depth + 1, incoming, seen);
+            }
+        }
+    }
+}
+
+/// Every active endpoint and the parts around its adapter-side connector, both directions.
+fn topology_dump() -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let Ok(en) = enumerator() else {
+        return "no audio device enumerator\n".into();
+    };
+    for (label, flow) in [("render", eRender), ("capture", eCapture)] {
+        let Ok(list) = (unsafe { en.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE) }) else {
+            continue;
+        };
+        for i in 0..unsafe { list.GetCount() }.unwrap_or(0) {
+            let Ok(device) = (unsafe { list.Item(i) }) else {
+                continue;
+            };
+            let _ = writeln!(
+                out,
+                "== {label} endpoint {:?} adapter={:?} g6={}",
+                friendly_name(&device).unwrap_or_default(),
+                adapter_id(&device).unwrap_or_default(),
+                is_g6(&device)
+            );
+            if let Some(part) = adapter_part(&device) {
+                for (dir, incoming) in [
+                    ("incoming (toward the hardware for capture)", true),
+                    ("outgoing", false),
+                ] {
+                    let _ = writeln!(out, "  -- {dir}");
+                    dump_part(&mut out, &part, 2, incoming, &mut Vec::new());
+                }
+            }
+        }
+    }
+    out
 }
 
 // --- Backend ------------------------------------------------------------
@@ -304,6 +404,18 @@ impl MixerBackend for WasapiMixer {
     }
 
     fn subscribe(&self, notify: Notify) {
+        if std::env::var_os(DUMP_VAR).is_some() {
+            let _ = std::thread::Builder::new()
+                .name("mixer-dump".into())
+                .spawn(|| {
+                    let text = with_com(topology_dump);
+                    let path = std::env::temp_dir().join("opendac-mixer-topology.txt");
+                    match std::fs::write(&path, text) {
+                        Ok(()) => log::info!("mixer: topology written to {}", path.display()),
+                        Err(e) => log::warn!("mixer: cannot write {}: {e}", path.display()),
+                    }
+                });
+        }
         let notify: Arc<dyn Fn() + Send + Sync> = Arc::from(notify);
         let spawned = std::thread::Builder::new()
             .name("mixer-wasapi".into())
